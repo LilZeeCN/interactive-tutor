@@ -1,0 +1,669 @@
+import { v4 as uuidv4 } from 'uuid';
+import { getDb } from '../db.js';
+import { dbGet, dbAll } from '../db-types.js';
+import { generateText } from './ai.js';
+import { buildSyllabusPrompt } from '../prompts/syllabus.js';
+import { buildLabListPrompt, buildLabDetailPrompt } from '../prompts/labs.js';
+import { buildProjectListPrompt, buildProjectDetailPrompt } from '../prompts/projects.js';
+import { buildLectureOutlinePrompt, buildLectureSectionPrompt, type LectureStyle, type ContentType } from '../prompts/lectures.js';
+import { getCourseMemory, injectMemorySection } from './memory.js';
+import { workspace } from './workspace.js';
+import { sanitizeLectureHtml } from './htmlSanitizer.js';
+import { validateLectureHtml } from './htmlValidator.js';
+import { extractHtmlSummary } from './htmlSummary.js';
+import { validateLectureContent } from './validator.js';
+import { trackTask } from '../helpers/taskTracker.js';
+import { parseJSON, safeJSONParse } from './parseJSON.js';
+
+interface CourseInput {
+  id: string;
+  title: string;
+  description: string;
+  content: string;
+  requirements: string;
+  createdAt: string;
+}
+
+// ===== Phase 1: 课程创建时只生成大纲（~5秒） =====
+export async function generateCourseOutline(course: CourseInput): Promise<void> {
+  const db = getDb();
+  console.log(`[outline] Generating syllabus for: ${course.title}`);
+
+  try {
+    const syllabusText = await generateText(
+      '你是一位资深的课程设计专家。请严格按照要求的 JSON 数组格式输出教学大纲，不要包含 markdown 代码块标记。',
+      buildSyllabusPrompt(course),
+      4096
+    );
+    const syllabus = parseJSON(syllabusText) as any[];
+    if (Array.isArray(syllabus) && syllabus.length > 0) {
+      const insert = db.prepare(
+        'INSERT INTO syllabus (id, course_id, week, topic, readings, assignments, status) VALUES (?, ?, ?, ?, ?, ?, ?)'
+      );
+      const insertAll = db.transaction((rows: any[]) => {
+        // Clear old syllabus rows before inserting new ones (handles regeneration)
+        db.prepare('DELETE FROM syllabus WHERE course_id = ?').run(course.id);
+        for (const row of rows) {
+          const assignments = (row.assignments || []).map((a: any) => {
+            const { id, ...rest } = a;
+            return rest;
+          });
+          insert.run(
+            uuidv4(), course.id, row.week, row.topic,
+            JSON.stringify(row.readings || []),
+            JSON.stringify(assignments),
+            row.status || 'pending'
+          );
+        }
+      });
+      insertAll(syllabus);
+      console.log(`[outline] Syllabus: ${syllabus.length} weeks`);
+    }
+  } catch (err) {
+    console.error('[outline] Syllabus generation failed:', err);
+  }
+
+  console.log(`[outline] Done. Labs/projects will be created on demand.`);
+
+  // Generate lecture outline + Chapter 1 content (tracked for graceful shutdown)
+  try {
+    trackTask(
+      generateLectureOutline(course.id)
+        .then(() => generateChapterContent(course.id, 1))
+        .catch((err) => console.error('[outline] Chapter 1 generation failed:', err)),
+      'lecture-outline-ch1'
+    );
+  } catch (err) {
+    console.error('[outline] Lecture outline/chapter1 generation failed:', err);
+  }
+}
+
+// ===== Generate lecture outline (all section titles) =====
+export async function generateLectureOutline(courseId: string): Promise<void> {
+  const db = getDb();
+
+  const course = dbGet<{ title: string; description: string; content: string; requirements: string; lecture_style: string }>('SELECT title, description, content, requirements, lecture_style FROM courses WHERE id = ?', courseId);
+  if (!course) return;
+
+  const existing = dbGet<{ c: number }>('SELECT COUNT(*) as c FROM lectures WHERE course_id = ?', courseId);
+  if ((existing?.c ?? 0) > 0) return; // Already generated
+
+  const syllabus = dbAll<{ week: number; topic: string }>(
+    'SELECT week, topic FROM syllabus WHERE course_id = ? ORDER BY week ASC', courseId
+  );
+
+  if (syllabus.length === 0) return;
+
+  const outlineText = await generateText(
+    '你是一位资深的课程讲师和教材编写专家。请严格按照要求的 JSON 数组格式输出讲义章节结构，不要包含 markdown 代码块标记。',
+    buildLectureOutlinePrompt(course, syllabus),
+    8192
+  );
+
+  const outline = parseJSON(outlineText) as any[];
+  if (!Array.isArray(outline) || outline.length === 0) return;
+
+  const insert = db.prepare(
+    'INSERT INTO lectures (id, course_id, chapter_num, section_num, title, status, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  );
+
+  db.transaction(() => {
+    for (let i = 0; i < outline.length; i++) {
+      const row = outline[i];
+      insert.run(
+        uuidv4(),
+        courseId,
+        row.chapter,
+        row.section_num,
+        `${row.chapter_title} / ${row.section_title}`,
+        'pending',
+        row.sort_order || (i + 1),
+        new Date().toISOString()
+      );
+    }
+  })();
+
+  console.log(`[lectures] Outline generated: ${outline.length} sections`);
+}
+
+// ===== Generate all sections' content for a specific chapter =====
+export async function generateChapterContent(courseId: string, chapterNum: number): Promise<void> {
+  const db = getDb();
+
+  interface LectureRow {
+    id: string; course_id: string; chapter_num: number; section_num: string;
+    title: string; content: string; status: string; sort_order: number;
+  }
+
+  const sections = dbAll<LectureRow & Record<string, unknown>>(
+    'SELECT * FROM lectures WHERE course_id = ? AND chapter_num = ? ORDER BY sort_order ASC',
+    courseId, chapterNum
+  );
+
+  console.log(`[lectures] generateChapterContent called: course=${courseId}, chapter=${chapterNum}, sections=${sections.length}`);
+
+  if (sections.length === 0) return;
+
+  const course = dbGet<{ title: string; description: string; content: string; lecture_style: string; lecture_format: string }>('SELECT title, description, content, lecture_style, lecture_format FROM courses WHERE id = ?', courseId);
+  if (!course) {
+    console.error(`[lectures] Course ${courseId} not found, skipping chapter ${chapterNum}`);
+    return;
+  }
+  const syllabus = dbAll<{ week: number; topic: string }>(
+    'SELECT week, topic FROM syllabus WHERE course_id = ? ORDER BY week ASC', courseId
+  );
+
+  const syllabusTopics = syllabus.map(s => `第${s.week}周：${s.topic}`).join('\n');
+
+  const pendingSections = sections.filter(s => !(s.content && s.content.length > 50));
+  if (pendingSections.length === 0) return;
+
+  // Generate all sections in parallel (up to 3 concurrent to avoid API rate limits)
+  const concurrency = Math.min(pendingSections.length, 3);
+  const queue = [...pendingSections];
+
+  async function generateNext(): Promise<void> {
+    while (queue.length > 0) {
+      const lecture = queue.shift()!;
+      try {
+        const parts = lecture.title.split(' / ');
+        const chapterTitle = parts[0] || '';
+        const sectionTitle = parts[1] || lecture.title;
+
+        // Get previous sections for context
+        const prevSections = dbAll<{ section_num: string; title: string; content: string }>(
+          'SELECT section_num, title, content FROM lectures WHERE course_id = ? AND sort_order < ? ORDER BY sort_order ASC',
+          courseId, lecture.sort_order as number
+        );
+
+        const previousSections = prevSections.map(s => ({
+          section_num: s.section_num,
+          title: s.title.split(' / ').pop() || s.title,
+          summary: s.content ? s.content.slice(0, 200) + '...' : '',
+        }));
+
+        // Get course memory for personalized context
+        const memory = getCourseMemory(courseId);
+        const memoryContext = memory ? injectMemorySection(memory) : '';
+        const personalizedNote = memoryContext
+          ? '\n请根据以上学生画像和学习状态，适当调整讲解的深度、例子选择和难度节奏。如果学生在某些知识点有困难，在这些地方增加更多解释和示例。\n'
+          : '';
+
+        const contentType: ContentType = (course.lecture_format === 'html' ? 'html' : 'markdown');
+        const isHtml = contentType === 'html';
+        const systemPrompt = isHtml
+          ? `你是一位善于教学的资深讲师。请生成完整的交互式 HTML 讲义文件。\n${memoryContext}${personalizedNote}`
+          : `你是一位善于教学的资深讲师。请严格按照要求的 Markdown 结构输出讲义内容。\n${memoryContext}${personalizedNote}`;
+
+        const content = await generateText(
+          systemPrompt,
+          buildLectureSectionPrompt({
+            course: { title: course.title, description: course.description || '', content: course.content || '' },
+            chapterTitle,
+            sectionNum: lecture.section_num,
+            sectionTitle,
+            previousSections,
+            syllabusTopics,
+            style: (course.lecture_style || 'khanmigo') as LectureStyle,
+            contentType,
+          }),
+          isHtml ? 16384 : 8192
+        );
+
+        let finalContent = content;
+        let finalSummary = '';
+        let finalContentType = contentType;
+        let validationStatus: string;
+
+        if (isHtml) {
+          // HTML path: validate HTML structure, sanitize, extract summary
+          const htmlValidation = validateLectureHtml(content);
+          if (htmlValidation.valid) {
+            const { html, warnings } = sanitizeLectureHtml(content);
+            if (warnings.length > 0) console.log(`[lectures] Sanitizer warnings for ${lecture.section_num}: ${warnings.join('; ')}`);
+            finalContent = html;
+            finalSummary = extractHtmlSummary(html, 1000);
+            finalContentType = 'html';
+            validationStatus = 'valid';
+          } else {
+            // Retry once with stricter prompt
+            console.log(`[lectures] HTML validation failed for ${lecture.section_num}: ${htmlValidation.errors.join(', ')}. Retrying...`);
+            const retryPrompt = buildLectureSectionPrompt({
+              course: { title: course.title, description: course.description || '', content: course.content || '' },
+              chapterTitle,
+              sectionNum: lecture.section_num as string,
+              sectionTitle,
+              previousSections,
+              syllabusTopics,
+              style: (course.lecture_style || 'khanmigo') as LectureStyle,
+              contentType: 'html',
+            }) + '\n\n【重要】上次生成的 HTML 有以下问题：' + htmlValidation.errors.join('；') + '\n请确保：1) 输出完整的 <!DOCTYPE html> 到 </html>；2) 有 <body> 或内容丰富的 <div>；3) 中文内容至少 300 字符。';
+
+            try {
+              const retryContent = await generateText(systemPrompt, retryPrompt, 16384);
+              const retryValidation = validateLectureHtml(retryContent);
+              if (retryValidation.valid) {
+                const { html, warnings } = sanitizeLectureHtml(retryContent);
+                if (warnings.length > 0) console.log(`[lectures] Sanitizer warnings (retry) for ${lecture.section_num}: ${warnings.join('; ')}`);
+                finalContent = html;
+                finalSummary = extractHtmlSummary(html, 1000);
+                finalContentType = 'html';
+                validationStatus = 'valid';
+              } else {
+                // HTML retry failed — fall back to Markdown
+                console.warn(`[lectures] HTML retry still failed for ${lecture.section_num}, falling back to Markdown`);
+                const mdContent = await generateText(
+                  `你是一位善于教学的资深讲师。请严格按照要求的 Markdown 结构输出讲义内容。\n${memoryContext}${personalizedNote}`,
+                  buildLectureSectionPrompt({
+                    course: { title: course.title, description: course.description || '', content: course.content || '' },
+                    chapterTitle,
+                    sectionNum: lecture.section_num as string,
+                    sectionTitle,
+                    previousSections,
+                    syllabusTopics,
+                    style: (course.lecture_style || 'khanmigo') as LectureStyle,
+                    contentType: 'markdown',
+                  }),
+                  8192
+                );
+                finalContent = mdContent;
+                finalContentType = 'markdown';
+                const mdValidation = validateLectureContent(mdContent);
+                validationStatus = mdValidation.valid ? 'valid' : 'invalid';
+              }
+            } catch (retryErr) {
+              console.error(`[lectures] HTML retry threw for ${lecture.section_num}:`, retryErr);
+              finalContent = content;
+              finalContentType = 'markdown';
+              validationStatus = 'invalid';
+            }
+          }
+        } else {
+          // Markdown path: existing validation logic
+          const validation = validateLectureContent(content);
+          if (validation.valid) {
+            validationStatus = 'valid';
+          } else {
+            console.log(`[lectures] Validation failed for ${lecture.section_num}, missing: ${validation.missing.join(', ')}. Retrying...`);
+            const stricterPrompt = buildLectureSectionPrompt({
+              course: { title: course.title, description: course.description || '', content: course.content || '' },
+              chapterTitle,
+              sectionNum: lecture.section_num as string,
+              sectionTitle,
+              previousSections,
+              syllabusTopics,
+              style: (course.lecture_style || 'khanmigo') as LectureStyle,
+              contentType: 'markdown',
+            }) + '\n\n【重要补充要求】请确保内容中包含以下必要部分：' + validation.missing.join('、');
+
+            const retryContent = await generateText(
+              '你是一位善于教学的资深讲师。请严格按照要求的 Markdown 结构输出讲义内容。你必须确保内容中包含学习目标、核心讲解、常见误区、练习检验等完整部分。',
+              stricterPrompt,
+              8192
+            );
+
+            const retryValidation = validateLectureContent(retryContent);
+            finalContent = retryContent;
+            validationStatus = retryValidation.valid ? 'valid' : 'invalid';
+            if (!retryValidation.valid) {
+              console.warn(`[lectures] Validation still failed for ${lecture.section_num} after retry`);
+            }
+          }
+        }
+
+        db.prepare('UPDATE lectures SET content = ?, content_type = ?, content_summary = ?, status = ?, validation_status = ? WHERE id = ?')
+          .run(finalContent, finalContentType, finalSummary, 'done', validationStatus, lecture.id);
+        console.log(`[lectures] Generated: ${lecture.section_num} (type: ${finalContentType}, validation: ${validationStatus})`);
+      } catch (err) {
+        console.error(`[lectures] Generation failed for ${lecture.section_num}:`, err);
+        db.prepare('UPDATE lectures SET status = ? WHERE id = ?').run('pending', lecture.id);
+      }
+    }
+  }
+
+  await Promise.all(Array.from({ length: concurrency }, () => generateNext()));
+
+  console.log(`[lectures] Chapter ${chapterNum} done`);
+}
+
+// ===== 按需创建 + 生成单个 Lab =====
+export async function createAndGenerateLab(courseId: string, syllabusRowId: string, week: number, title: string, topic: string): Promise<string> {
+  const db = getDb();
+  const labId = 'lab-' + uuidv4().slice(0, 8);
+
+  // Atomically create lab entry + link in syllabus
+  db.transaction(() => {
+    db.prepare(
+      'INSERT INTO labs (id, course_id, title, topic, status, time, week, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(labId, courseId, title, topic, 'in-progress', '2小时', week, new Date().toISOString());
+
+    const row = dbGet<{ assignments: string }>('SELECT assignments FROM syllabus WHERE id = ?', syllabusRowId);
+    if (row) {
+      const assignments: any[] = safeJSONParse(row.assignments, []);
+      for (const a of assignments) {
+        if (a.type === 'lab' && a.title === title && !a.id) {
+          a.id = labId;
+          break;
+        }
+      }
+      db.prepare('UPDATE syllabus SET assignments = ? WHERE id = ?').run(JSON.stringify(assignments), syllabusRowId);
+    }
+  })();
+
+  // Generate detail in background
+  generateLabDetail(courseId, labId).catch(err => {
+    console.error(`Lab generation failed: ${labId}`, err);
+  });
+
+  return labId;
+}
+
+// ===== 按需创建 + 生成单个 Project =====
+export async function createAndGenerateProject(courseId: string, syllabusRowId: string, title: string, description: string): Promise<string> {
+  const db = getDb();
+  const projId = 'proj-' + uuidv4().slice(0, 8);
+
+  // Atomically create project entry + link in syllabus
+  db.transaction(() => {
+    db.prepare(
+      'INSERT INTO projects (id, course_id, title, description, status, progress, tags, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(projId, courseId, title, description, 'in-progress', 0, '[]', new Date().toISOString());
+
+    const row = dbGet<{ assignments: string }>('SELECT assignments FROM syllabus WHERE id = ?', syllabusRowId);
+    if (row) {
+      const assignments: any[] = safeJSONParse(row.assignments, []);
+      for (const a of assignments) {
+        if (a.type === 'project' && a.title === title && !a.id) {
+          a.id = projId;
+          break;
+        }
+      }
+      db.prepare('UPDATE syllabus SET assignments = ? WHERE id = ?').run(JSON.stringify(assignments), syllabusRowId);
+    }
+  })();
+
+  generateProjectDetail(courseId, projId).catch(err => {
+    console.error(`Project generation failed: ${projId}`, err);
+  });
+
+  return projId;
+}
+
+// ===== Phase 2: 按需生成单个 Lab 详情 =====
+export async function generateLabDetail(courseId: string, labId: string): Promise<void> {
+  const db = getDb();
+
+  const lab = dbGet<{ id: string; title: string; topic: string; instructions: string; week: number }>('SELECT * FROM labs WHERE id = ? AND course_id = ?', labId, courseId);
+  if (!lab) throw new Error('Lab not found');
+
+  // Skip if already generated
+  if (lab.instructions && lab.instructions.length > 10) {
+    console.log(`[lab-detail] Lab "${lab.title}" already has content, skipping`);
+    return;
+  }
+
+  const course = dbGet<{ title: string; description: string; content: string }>('SELECT title, description, content FROM courses WHERE id = ?', courseId);
+  const syllabusRows = dbAll<{ week: number; topic: string }>('SELECT week, topic FROM syllabus WHERE course_id = ? ORDER BY week ASC', courseId);
+  const existingLabs = dbAll<{ title: string }>('SELECT title FROM labs WHERE course_id = ? AND id != ?', courseId, labId);
+
+  const syllabusTopics = syllabusRows.length > 0
+    ? syllabusRows.map(s => `第${s.week}周：${s.topic}`).join('\n')
+    : undefined;
+  const previousLabs = existingLabs.length > 0
+    ? existingLabs.map(l => `Lab: ${l.title}`).join(', ')
+    : undefined;
+
+  console.log(`[lab-detail] Generating detail for: ${lab.title}`);
+  let detail: any = null;
+  let lastError: Error | null = null;
+  const maxAttempts = 2;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const detailText = await generateText(
+        '你是一位资深的课程讲师和编程教育专家。请严格按照要求的 JSON 格式输出，不要包含 markdown 代码块标记。',
+        buildLabDetailPrompt({
+          course: { title: course.title, description: course.description || '', content: course.content || '' },
+          labTitle: lab.title,
+          labTopic: lab.topic || '',
+          weekNumber: lab.week as number,
+          totalWeeks: syllabusRows.length,
+          syllabusTopics,
+          previousLabs,
+        }),
+        16384
+      );
+      detail = parseJSON(detailText) as any;
+      break;
+    } catch (err) {
+      lastError = err as Error;
+      console.warn(`[lab-detail] Attempt ${attempt}/${maxAttempts} failed for ${lab.title}: ${lastError.message}`);
+    }
+  }
+
+  if (!detail) throw lastError!;
+
+  db.prepare(
+    'UPDATE labs SET instructions = ?, starter_code = ?, test_cases = ? WHERE id = ? AND course_id = ?'
+  ).run(
+    detail?.instructions || '',
+    JSON.stringify(detail?.starter_code || {}),
+    JSON.stringify(detail?.test_cases || []),
+    labId, courseId
+  );
+
+  // Write starter files to disk
+  if (detail?.starter_code && Object.keys(detail.starter_code).length > 0) {
+    try {
+      workspace.writeFiles(workspace.getItemPath(courseId, 'labs', labId), detail.starter_code);
+    } catch (err) {
+      console.error(`Failed to write starter files for lab ${labId}:`, err);
+    }
+  }
+
+  console.log(`[lab-detail] Done: ${lab.title}`);
+}
+
+// ===== Phase 2: 按需生成单个 Project 详情 =====
+export async function generateProjectDetail(courseId: string, projectId: string): Promise<void> {
+  const db = getDb();
+
+  const proj = dbGet<{ id: string; title: string; description: string; starter_code: string }>('SELECT * FROM projects WHERE id = ? AND course_id = ?', projectId, courseId);
+  if (!proj) throw new Error('Project not found');
+
+  // Skip if already generated (but allow retry if it was an error marker)
+  if (proj.starter_code && typeof proj.starter_code === 'string' && proj.starter_code.length > 10) {
+    try {
+      const parsed = JSON.parse(proj.starter_code);
+      if (parsed.error) {
+        // Previous generation failed — clear and retry
+        const db3 = getDb();
+        db3.prepare('UPDATE projects SET starter_code = NULL WHERE id = ?').run(projectId);
+      } else {
+        console.log(`[proj-detail] Project "${proj.title}" already has content, skipping`);
+        return;
+      }
+    } catch {
+      console.log(`[proj-detail] Project "${proj.title}" already has content, skipping`);
+      return;
+    }
+  }
+
+  const course = dbGet<{ title: string; description: string; content: string }>('SELECT title, description, content FROM courses WHERE id = ?', courseId);
+  const syllabusRows = dbAll<{ week: number; topic: string }>('SELECT week, topic FROM syllabus WHERE course_id = ? ORDER BY week ASC', courseId);
+  const completedLabs = dbAll<{ title: string }>("SELECT title FROM labs WHERE course_id = ? AND status = 'completed'", courseId);
+
+  const syllabusTopics = syllabusRows.length > 0
+    ? syllabusRows.map(s => `第${s.week}周：${s.topic}`).join('\n')
+    : undefined;
+  const completedLabsStr = completedLabs.length > 0
+    ? completedLabs.map(l => `Lab: ${l.title}`).join(', ')
+    : undefined;
+
+  console.log(`[proj-detail] Generating detail for: ${proj.title}`);
+  let detail: any = null;
+  let lastError: Error | null = null;
+  const maxAttempts = 2;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const detailText = await generateText(
+        '你是一位资深的课程讲师和编程教育专家。请严格按照要求的 JSON 格式输出，不要包含 markdown 代码块标记。',
+        buildProjectDetailPrompt({
+          course: { title: course.title, description: course.description || '', content: course.content || '' },
+          projectTitle: proj.title,
+          projectDesc: proj.description as string || '',
+          syllabusTopics,
+          completedLabs: completedLabsStr,
+        }),
+        16384
+      );
+      detail = parseJSON(detailText) as any;
+      break;
+    } catch (err) {
+      lastError = err as Error;
+      console.warn(`[proj-detail] Attempt ${attempt}/${maxAttempts} failed for ${proj.title}: ${lastError.message}`);
+    }
+  }
+
+  if (!detail) throw lastError!;
+
+  db.prepare(
+    'UPDATE projects SET description = ?, milestones = ?, starter_code = ? WHERE id = ? AND course_id = ?'
+  ).run(
+    detail?.description || proj.description || '',
+    JSON.stringify(detail?.milestones || []),
+    JSON.stringify(detail?.starter_code || {}),
+    projectId, courseId
+  );
+
+  // Write starter files to disk
+  if (detail?.starter_code && Object.keys(detail.starter_code).length > 0) {
+    try {
+      workspace.writeFiles(workspace.getItemPath(courseId, 'projects', projectId), detail.starter_code);
+    } catch (err) {
+      console.error(`Failed to write starter files for project ${projectId}:`, err);
+    }
+  }
+
+  console.log(`[proj-detail] Done: ${proj.title}`);
+}
+
+// ===== Backward compatible: regenerate all (for existing courses) =====
+export async function generateCourseContent(course: CourseInput): Promise<void> {
+  await generateCourseOutline(course);
+
+  // Then generate all lab + project details
+  const db = getDb();
+  const labs = dbAll<{ id: string }>('SELECT id FROM labs WHERE course_id = ?', course.id);
+  const projects = dbAll<{ id: string }>('SELECT id FROM projects WHERE course_id = ?', course.id);
+
+  for (const lab of labs) {
+    try { await generateLabDetail(course.id, lab.id); } catch (err) {
+      console.error(`  Failed lab detail ${lab.id}:`, err);
+    }
+  }
+  for (const proj of projects) {
+    try { await generateProjectDetail(course.id, proj.id); } catch (err) {
+      console.error(`  Failed project detail ${proj.id}:`, err);
+    }
+  }
+
+  // Link assignments atomically
+  try {
+    const allLabs = dbAll<{ id: string; week: number }>('SELECT id, week FROM labs WHERE course_id = ?', course.id);
+    const allProjects = dbAll<{ id: string }>('SELECT id FROM projects WHERE course_id = ?', course.id);
+    const syllabusRows = dbAll<{ id: string; week: number; assignments: string }>('SELECT id, week, assignments FROM syllabus WHERE course_id = ?', course.id);
+    if (syllabusRows.length === 0) return;
+
+    const linkAssignments = db.transaction(() => {
+      let projectIdx = 0;
+      const updateStmt = db.prepare('UPDATE syllabus SET assignments = ? WHERE id = ?');
+      for (const row of syllabusRows) {
+        const assignments: any[] = safeJSONParse(row.assignments, []);
+        let changed = false;
+        for (const a of assignments) {
+          if (a.type === 'lab') {
+            const match = allLabs.find((l: any) => l.week === row.week);
+            if (match) { a.id = match.id; changed = true; }
+          } else if (a.type === 'project') {
+            if (projectIdx < allProjects.length) {
+              a.id = allProjects[projectIdx].id;
+              projectIdx++;
+              changed = true;
+            }
+          }
+        }
+        if (changed) updateStmt.run(JSON.stringify(assignments), row.id);
+      }
+    });
+    linkAssignments();
+    console.log('  Assignments linked');
+  } catch (err) {
+    console.error('  Assignment linking failed:', err);
+  }
+}
+
+// ===== Server startup recovery: resume interrupted generation tasks =====
+export async function recoverPendingGenerations(): Promise<void> {
+  const db = getDb();
+  let recovered = 0;
+
+  // Step 1: Courses with no syllabus (outline generation never completed)
+  const noSyllabus = dbAll<{ id: string; title: string; description: string; content: string; requirements: string; created_at: string }>(
+    `SELECT id, title, description, content, requirements, created_at FROM courses
+     WHERE id NOT IN (SELECT DISTINCT course_id FROM syllabus)`
+  );
+  for (const c of noSyllabus) {
+    console.log(`[recovery] "${c.title}" — no syllabus, generating outline`);
+    trackTask(
+      generateCourseOutline({ ...c, createdAt: c.created_at }).catch(err => console.error(`[recovery] Outline failed for "${c.title}":`, err)),
+      `recovery-outline-${c.id}`
+    );
+    recovered++;
+  }
+
+  // Step 2: Courses with syllabus but no lecture outline
+  const noLectures = dbAll<{ id: string }>(
+    `SELECT c.id FROM courses c
+     WHERE c.id IN (SELECT DISTINCT course_id FROM syllabus)
+     AND c.id NOT IN (SELECT DISTINCT course_id FROM lectures)`
+  );
+  // Exclude courses already handled by step 1
+  const noSyllabusIds = new Set(noSyllabus.map(c => c.id));
+  const noLecturesFiltered = noLectures.filter(c => !noSyllabusIds.has(c.id));
+  for (const c of noLecturesFiltered) {
+    console.log(`[recovery] ${c.id} — has syllabus but no lectures, generating outline + chapter 1`);
+    trackTask(
+      generateLectureOutline(c.id)
+        .then(() => generateChapterContent(c.id, 1))
+        .catch(err => console.error(`[recovery] Lectures failed for ${c.id}:`, err)),
+      `recovery-lectures-${c.id}`
+    );
+    recovered++;
+  }
+
+  // Step 3: Courses with incomplete chapter 1 (sections stuck in pending/generating)
+  const incompleteCh1 = dbAll<{ course_id: string }>(
+    `SELECT DISTINCT l.course_id FROM lectures l
+     INNER JOIN courses c ON c.id = l.course_id
+     WHERE l.chapter_num = 1 AND l.status IN ('pending', 'generating')`
+  );
+  const noLecturesIds = new Set(noLecturesFiltered.map(c => c.id));
+  for (const { course_id } of incompleteCh1) {
+    // Skip if already handled by step 1 or 2
+    if (noSyllabusIds.has(course_id) || noLecturesIds.has(course_id)) continue;
+
+    console.log(`[recovery] ${course_id} — chapter 1 incomplete, resuming generation`);
+    trackTask(
+      generateChapterContent(course_id, 1)
+        .catch(err => console.error(`[recovery] Chapter 1 failed for ${course_id}:`, err)),
+      `recovery-ch1-${course_id}`
+    );
+    recovered++;
+  }
+
+  if (recovered > 0) {
+    console.log(`[recovery] Started recovery for ${recovered} course(s)`);
+  }
+}
