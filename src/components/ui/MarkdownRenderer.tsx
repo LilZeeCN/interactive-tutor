@@ -4,8 +4,8 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { sanitizePlugin } from '../lib/sanitize';
-import { markdownComponents } from '../utils/codeRenderer.tsx';
+import { sanitizePlugin } from '../../lib/sanitize';
+import { markdownComponents } from '../../utils/codeRenderer.tsx';
 
 // Stable plugin arrays — created once, reused across all instances
 const remarkPlugins = [remarkGfm, remarkMath];

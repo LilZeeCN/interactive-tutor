@@ -1,6 +1,11 @@
 import { Router, Request, Response } from 'express';
 import { getDb } from '../db.js';
-import { generateChapterContent, generateLectureOutline } from '../services/generator.js';
+import {
+  cancelChapterContentGeneration,
+  generateLectureOutline,
+  startChapterContentGeneration,
+  wasGenerationCancelled,
+} from '../services/generator.js';
 import { asyncHandler } from '../helpers/asyncHandler.js';
 import { dbGet, dbAll } from '../db-types.js';
 
@@ -79,10 +84,21 @@ lecturesRouter.post('/:id/lectures/generate-chapter/:chapterNum', asyncHandler(a
     return;
   }
 
+  db.prepare(
+    "UPDATE lectures SET status = 'generating' WHERE course_id = ? AND chapter_num = ? AND status != 'done'"
+  ).run(id, chapter);
+
   // Respond immediately, generate in background
   res.json({ message: `正在生成第${chapter}章内容...`, chapter: chapter, sectionsCount: pendingSections.length });
 
-  generateChapterContent(id, chapter).catch((err) => {
+  const generation = startChapterContentGeneration(id, chapter);
+  if (!generation.started || !generation.promise) return;
+
+  generation.promise.catch((err) => {
+    if (wasGenerationCancelled(err)) {
+      console.warn(`[lectures] Chapter ${chapter} generation cancelled`);
+      return;
+    }
     console.error(`[lectures] Chapter ${chapter} generation failed:`, err);
   });
 }));
@@ -98,11 +114,12 @@ lecturesRouter.post('/:id/lectures/cancel-chapter/:chapterNum', (req: Request, r
     return;
   }
 
+  const cancelled = cancelChapterContentGeneration(id, chapter);
   const result = db.prepare(
     "UPDATE lectures SET status = 'pending', content = NULL WHERE course_id = ? AND chapter_num = ? AND status = 'generating'"
   ).run(id, chapter);
 
-  res.json({ success: true, resetCount: result.changes });
+  res.json({ success: true, cancelled, resetCount: result.changes });
 });
 
 // GET /api/courses/:id/lectures/:lectureId — get single section with content

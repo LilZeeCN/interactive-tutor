@@ -1,6 +1,7 @@
 import { Anthropic } from '@anthropic-ai/sdk';
 import OpenAI from 'openai';
 import { decrypt } from './crypto.js';
+import { getDb } from '../db.js';
 import { dbAll } from '../db-types.js';
 import { estimateTokens, truncateMessages } from './tokens.js';
 import { CHAT_PER_MESSAGE_CAP, CHAT_MIN_HISTORY } from './tokenBudgets.js';
@@ -55,7 +56,10 @@ function getAISettings(): { api_url: string; api_key: string; model: string; api
   let apiKey = '';
   try {
     apiKey = settings.api_key ? decrypt(settings.api_key) : '';
-  } catch {
+  } catch (e) {
+    const db = getDb();
+    const stored = db.prepare("SELECT value FROM settings WHERE key = 'api_key'").get() as { value: string } | undefined;
+    console.error(`[ai] API Key decrypt failed. stored value prefix: ${(stored?.value || '').slice(0, 30)}, error: ${(e as Error).message}`);
     cachedAnthropicClient = null;
     cachedOpenAIClient = null;
     cachedSettings = null;
@@ -342,7 +346,7 @@ export async function generateText(
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userMessage },
       ],
-    }, { timeout: 300_000 });
+    }, { timeout: 300_000, signal: abortSignal ?? undefined });
 
     return response.choices[0]?.message?.content || '';
   }

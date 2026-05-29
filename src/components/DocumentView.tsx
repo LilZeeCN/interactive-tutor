@@ -3,11 +3,11 @@ import { BookOpen, FileText, Code, FolderGit2 } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { SyllabusRow, Lab, Project } from '../types';
 import { cn } from '../lib/utils';
-import { SkeletonText } from './Skeleton';
-import { SyllabusTab } from './SyllabusTab';
-import { LabsTab } from './LabsTab';
-import { ProjectsTab } from './ProjectsTab';
-import { NotesTab } from './NotesTab';
+import { SkeletonText } from './layout/Skeleton';
+import { SyllabusTab } from './course/SyllabusTab';
+import { LabsTab } from './course/LabsTab';
+import { ProjectsTab } from './course/ProjectsTab';
+import { NotesTab } from './course/NotesTab';
 
 interface TopicNote {
   id: string;
@@ -50,11 +50,12 @@ export function DocumentView({ title, type, courseId, onNavigate, pendingNavId }
   useEffect(() => {
     setLoading(true);
     Promise.all([
-      apiFetch(`/api/courses/${courseId}/syllabus`).catch(() => []),
-      apiFetch(`/api/courses/${courseId}/labs`).catch(() => []),
-      apiFetch(`/api/courses/${courseId}/projects`).catch(() => []),
-      apiFetch(`/api/courses/${courseId}/topic-notes`).catch(() => []),
+      apiFetch(`/api/courses/${courseId}/syllabus`).catch((e) => { console.error('[DocumentView] syllabus fetch failed:', e); return []; }),
+      apiFetch(`/api/courses/${courseId}/labs`).catch((e) => { console.error('[DocumentView] labs fetch failed:', e); return []; }),
+      apiFetch(`/api/courses/${courseId}/projects`).catch((e) => { console.error('[DocumentView] projects fetch failed:', e); return []; }),
+      apiFetch(`/api/courses/${courseId}/topic-notes`).catch((e) => { console.error('[DocumentView] topic-notes fetch failed:', e); return []; }),
     ]).then(([s, l, p, tn]) => {
+      console.log('[DocumentView] loaded:', { syllabus: s.length, labs: l.length, projects: p.length, notes: tn.length });
       setSyllabus(s);
       setLabs(l);
       setProjects(p);

@@ -1,11 +1,16 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { createApp } from '../index.js';
+import { closeDb } from '../db.js';
 import type { Server } from 'http';
+import { mkdtempSync, rmSync } from 'fs';
+import { join } from 'path';
+import { tmpdir } from 'os';
 
 const BASE = 'http://localhost:3099';
 
 let server: Server;
 let authToken: string;
+let tempDir: string;
 
 async function authFetch(url: string, init?: RequestInit) {
   const headers = new Headers(init?.headers);
@@ -15,21 +20,42 @@ async function authFetch(url: string, init?: RequestInit) {
 }
 
 beforeAll(async () => {
+  tempDir = mkdtempSync(join(tmpdir(), 'interactive-tutor-test-'));
+  process.env.DB_PATH = join(tempDir, 'tutor.db');
   process.env.PORT = '3099';
   process.env.ENCRYPTION_KEY = 'test-encryption-key-for-integration-tests';
-  const { server: s } = createApp();
+  const { server: s } = await createApp();
   server = s;
   await new Promise<void>((resolve) => {
     server.listen(3099, () => resolve());
   });
-  // Bootstrap auth token
-  const bootstrapRes = await fetch(`${BASE}/api/bootstrap`);
-  const bootstrapData = await bootstrapRes.json();
-  authToken = bootstrapData.token as string;
+  // Setup auth: check status, then setup password if needed
+  const statusRes = await fetch(`${BASE}/api/auth/status`);
+  const statusData = await statusRes.json();
+  if (!statusData.configured) {
+    const setupRes = await fetch(`${BASE}/api/auth/setup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: 'test1234' }),
+    });
+    const setupData = await setupRes.json();
+    authToken = setupData.token;
+  } else {
+    const loginRes = await fetch(`${BASE}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: 'test1234' }),
+    });
+    const loginData = await loginRes.json();
+    authToken = loginData.token;
+  }
 }, 10000);
 
 afterAll(async () => {
-  server.close();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  closeDb();
+  if (tempDir) rmSync(tempDir, { recursive: true, force: true });
+  delete process.env.DB_PATH;
 });
 
 describe('Courses API', () => {

@@ -9,6 +9,7 @@ import { escapeLIKE } from '../helpers/sqlUtils.js';
 import { estimateTokens, truncateMessages, truncateTextToTokens } from '../services/tokens.js';
 import { summarizeDroppedMessages } from '../services/summarizer.js';
 import { dbGet, dbAll } from '../db-types.js';
+import { requireFields } from '../middleware/validate.js';
 import {
   CHAT_HISTORY_BUDGET,
   CHAT_PER_MESSAGE_CAP,
@@ -78,7 +79,7 @@ function shouldSuggestNotes(
 }
 
 // POST /api/chat - send message and get streaming AI reply
-chatRouter.post('/', asyncHandler(async (req: Request, res: Response) => {
+chatRouter.post('/', requireFields('topicId', 'message'), asyncHandler(async (req: Request, res: Response) => {
   const db = getDb();
   const { topicId, message } = req.body;
 
@@ -110,6 +111,10 @@ chatRouter.post('/', asyncHandler(async (req: Request, res: Response) => {
 
   // Set up SSE with heartbeat
   const sse = setupSSERes(res, req);
+  const abortCtrl = new AbortController();
+  const disconnectPoll = setInterval(() => {
+    if (sse.isDisconnected() && !abortCtrl.signal.aborted) abortCtrl.abort();
+  }, 1000);
 
   // Send user message confirmation
   sse.sendEvent({ type: 'user_ack', id: userMsgId });
@@ -174,6 +179,7 @@ chatRouter.post('/', asyncHandler(async (req: Request, res: Response) => {
     }, {
       sendEvent: (e) => { if (!sse.isDisconnected()) sse.sendEvent(e); },
       isDisconnected: () => sse.isDisconnected(),
+      abortSignal: abortCtrl.signal,
     });
 
     if (deepSolveResult) {
@@ -266,7 +272,7 @@ chatRouter.post('/', asyncHandler(async (req: Request, res: Response) => {
         }
         sse.cleanup();
       },
-      undefined // no abortSignal — let AI continue even if client disconnects
+      abortCtrl.signal
     );
     } // end of else (normal streaming)
   } catch (err: any) {
@@ -291,6 +297,7 @@ chatRouter.post('/', asyncHandler(async (req: Request, res: Response) => {
     }
     sse.cleanup();
   } finally {
+    clearInterval(disconnectPoll);
     // Always release the lock, even if generation completed in background
     generatingTopics.delete(topicId);
   }

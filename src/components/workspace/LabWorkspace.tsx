@@ -5,19 +5,19 @@ import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { sanitizePlugin } from '../lib/sanitize';
+import { sanitizePlugin } from '../../lib/sanitize';
 import { FileTree } from './FileTree';
-import { EnvironmentStatus } from './EnvironmentStatus';
-import { cn } from '../lib/utils';
-import { markdownComponents } from '../utils/codeRenderer.tsx';
+import { EnvironmentStatus } from '../settings/EnvironmentStatus';
+import { cn } from '../../lib/utils';
+import { markdownComponents } from '../../utils/codeRenderer.tsx';
 import { motion } from 'motion/react';
 import MonacoEditor from '@monaco-editor/react';
-import { useWorkspace } from '../hooks/useWorkspace';
-import { useTerminal } from '../hooks/useTerminal';
-import { fetchSSEWithRetry } from '../hooks/useStreamFetch';
-import { getMonacoLang } from '../lib/monaco';
+import { useWorkspace } from '../../hooks/useWorkspace';
+import { useTerminal } from '../../hooks/useTerminal';
+import { fetchSSEWithRetry } from '../../hooks/useStreamFetch';
+import { getMonacoLang } from '../../lib/monaco';
 
-import { ResizablePanel } from './ResizablePanel';
+import { ResizablePanel } from '../layout/ResizablePanel';
 import type { FileNode } from './FileTree';
 
 export function LabWorkspace({ lab, onBack, isInstructionsOpen, onToggleInstructions, courseId }: {

@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Plus, BookOpen, Trash2, X, Sparkles, ArrowRight, Settings, Loader2 } from 'lucide-react';
-import { Course } from '../types';
-import { cn } from '../lib/utils';
-import { apiFetch } from '../lib/api';
+import { Plus, BookOpen, Trash2, X, Sparkles, ArrowRight, Settings, Loader2, AlertCircle, RotateCcw } from 'lucide-react';
+import { Course } from '../../types';
+import { cn } from '../../lib/utils';
+import { apiFetch } from '../../lib/api';
 
 interface CourseSelectionProps {
   courses: Course[];
@@ -11,9 +11,10 @@ interface CourseSelectionProps {
   onCreateCourse: (course: Omit<Course, 'id' | 'createdAt'>) => Promise<string | null>;
   onDeleteCourse: (id: string) => void;
   onOpenSettings: () => void;
+  onCourseReady?: (courseId: string) => void;
 }
 
-export function CourseSelection({ courses, onSelectCourse, onCreateCourse, onDeleteCourse, onOpenSettings }: CourseSelectionProps) {
+export function CourseSelection({ courses, onSelectCourse, onCreateCourse, onDeleteCourse, onOpenSettings, onCourseReady }: CourseSelectionProps) {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [newCourse, setNewCourse] = useState({
     title: '',
@@ -24,6 +25,7 @@ export function CourseSelection({ courses, onSelectCourse, onCreateCourse, onDel
     lectureFormat: 'markdown' as 'markdown' | 'html'
   });
   const [generatingIds, setGeneratingIds] = useState<Set<string>>(new Set());
+  const [errorIds, setErrorIds] = useState<Map<string, string>>(new Map());
   const generatingRef = useRef<Set<string>>(new Set());
 
   // Keep ref in sync
@@ -35,16 +37,25 @@ export function CourseSelection({ courses, onSelectCourse, onCreateCourse, onDel
     let cancelled = false;
     const checkAll = async () => {
       const stillGenerating = new Set<string>();
+      const errors = new Map<string, string>();
       const results = await Promise.allSettled(
-        courses.map(c => apiFetch<{ done: boolean }>(`/api/courses/${c.id}/generation-status`))
+        courses.map(c => apiFetch<{ done: boolean; error?: string | null }>(`/api/courses/${c.id}/generation-status`))
       );
       for (let i = 0; i < results.length; i++) {
         const r = results[i];
-        if (r.status === 'fulfilled' && !(r as PromiseFulfilledResult<{ done: boolean }>).value.done) {
-          stillGenerating.add(courses[i].id);
+        if (r.status === 'fulfilled') {
+          const val = (r as PromiseFulfilledResult<{ done: boolean; error?: string | null }>).value;
+          if (val.error) {
+            errors.set(courses[i].id, val.error);
+          } else if (!val.done) {
+            stillGenerating.add(courses[i].id);
+          }
         }
       }
-      if (!cancelled) setGeneratingIds(stillGenerating);
+      if (!cancelled) {
+        setGeneratingIds(stillGenerating);
+        setErrorIds(errors);
+      }
     };
     checkAll();
     return () => { cancelled = true; };
@@ -54,20 +65,34 @@ export function CourseSelection({ courses, onSelectCourse, onCreateCourse, onDel
   useEffect(() => {
     if (generatingIds.size === 0) return;
     const timer = setInterval(async () => {
-      // Use ref to avoid stale closure
       const currentIds = generatingRef.current;
       if (currentIds.size === 0) return;
       const ids = [...currentIds];
       const results = await Promise.allSettled(
-        ids.map(id => apiFetch<{ done: boolean }>(`/api/courses/${id}/generation-status`))
+        ids.map(id => apiFetch<{ done: boolean; error?: string | null }>(`/api/courses/${id}/generation-status`))
       );
       const toRemove: string[] = [];
       for (let i = 0; i < results.length; i++) {
-        if (results[i].status === 'fulfilled' && (results[i] as PromiseFulfilledResult<{ done: boolean }>).value.done) {
-          toRemove.push(ids[i]);
+        const r = results[i];
+        if (r.status === 'fulfilled') {
+          const val = (r as PromiseFulfilledResult<{ done: boolean; error?: string | null }>).value;
+          if (val.done || val.error) {
+            toRemove.push(ids[i]);
+            if (val.error) {
+              setErrorIds(prev => { const n = new Map(prev); n.set(ids[i], val.error!); return n; });
+            }
+          }
         }
       }
       if (toRemove.length > 0) {
+        // Auto-navigate to the first course that just finished generating
+        const readyNoError = toRemove.filter(id => {
+          const r = results.find((_, i) => ids[i] === id);
+          return r?.status === 'fulfilled' && !(r as PromiseFulfilledResult<{ done: boolean; error?: string | null }>).value.error;
+        });
+        if (readyNoError.length > 0 && onCourseReady) {
+          onCourseReady(readyNoError[0]);
+        }
         setGeneratingIds(prev => {
           const next = new Set(prev);
           for (const id of toRemove) next.delete(id);
@@ -139,6 +164,8 @@ export function CourseSelection({ courses, onSelectCourse, onCreateCourse, onDel
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {courses.map((course) => {
               const isGenerating = generatingIds.has(course.id);
+              const errorMsg = errorIds.get(course.id);
+              const hasError = !!errorMsg;
               return (
               <motion.div
                 key={course.id}
@@ -146,18 +173,26 @@ export function CourseSelection({ courses, onSelectCourse, onCreateCourse, onDel
                 animate={{ opacity: 1, y: 0 }}
                 className={cn(
                   "group relative bg-bg-surface border border-white/10 rounded-3xl p-6 transition-all flex flex-col h-[280px]",
-                  isGenerating ? "border-amber-500/20 pointer-events-none opacity-70" : "hover:border-white/30 cursor-pointer"
+                  isGenerating ? "border-amber-500/20 pointer-events-none opacity-70" :
+                  hasError ? "border-red-500/30" :
+                  "hover:border-white/30 cursor-pointer"
                 )}
-                onClick={() => !isGenerating && onSelectCourse(course)}
+                onClick={() => !isGenerating && !hasError && onSelectCourse(course)}
               >
                 <div className="flex justify-between items-start mb-4">
-                  <div className={cn("w-12 h-12 rounded-2xl flex items-center justify-center transition-transform", isGenerating ? "bg-amber-500/10" : "bg-white/5 group-hover:scale-110")}>
+                  <div className={cn("w-12 h-12 rounded-2xl flex items-center justify-center transition-transform",
+                    isGenerating ? "bg-amber-500/10" :
+                    hasError ? "bg-red-500/10" :
+                    "bg-white/5 group-hover:scale-110"
+                  )}>
                     {isGenerating
                       ? <Loader2 className="w-6 h-6 text-amber-400 animate-spin" />
+                      : hasError
+                      ? <AlertCircle className="w-6 h-6 text-red-400" />
                       : <BookOpen className="w-6 h-6 text-white/80" />
                     }
                   </div>
-                  {!isGenerating && (
+                  {!isGenerating && !hasError && (
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
@@ -173,7 +208,7 @@ export function CourseSelection({ courses, onSelectCourse, onCreateCourse, onDel
 
                 <h3 className="text-xl font-semibold mb-2 line-clamp-1">{course.title}</h3>
                 <p className="text-sm text-white/50 line-clamp-2 mb-6 flex-1">
-                  {course.description || course.content}
+                  {hasError ? errorMsg : (course.description || course.content)}
                 </p>
 
                 <div className="mt-auto flex items-center justify-between pt-4 border-t border-white/5">
@@ -183,11 +218,34 @@ export function CourseSelection({ courses, onSelectCourse, onCreateCourse, onDel
                       <span className="text-xs text-amber-400 font-medium">AI 生成中...</span>
                     )}
                   </div>
-                  {!isGenerating && (
+                  {hasError ? (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          setErrorIds(prev => { const n = new Map(prev); n.delete(course.id); return n; });
+                          setGeneratingIds(prev => new Set([...prev, course.id]));
+                          await apiFetch(`/api/courses/${course.id}/regenerate`, { method: 'POST' });
+                        }}
+                        className="flex items-center gap-1.5 text-sm font-medium text-red-400 hover:text-red-300 transition-colors"
+                      >
+                        <RotateCcw className="w-4 h-4" /> 重试
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDeleteCourse(course.id);
+                        }}
+                        className="flex items-center gap-1.5 text-sm font-medium text-white/40 hover:text-red-400 transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" /> 删除
+                      </button>
+                    </div>
+                  ) : !isGenerating ? (
                     <div className="flex items-center gap-1 text-sm font-medium text-white/70 group-hover:text-white transition-colors">
                       进入学习 <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
                     </div>
-                  )}
+                  ) : null}
                 </div>
               </motion.div>
               );

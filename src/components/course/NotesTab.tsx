@@ -1,11 +1,11 @@
 import { useState, useEffect } from 'react';
 import { FileText, CheckCircle2, Circle, Sparkles, Loader2 } from 'lucide-react';
-import { fetchSSEWithRetry } from '../hooks/useStreamFetch';
-import { apiFetch } from '../lib/api';
-import { SyllabusRow } from '../types';
-import { cn } from '../lib/utils';
+import { fetchSSEWithRetry } from '../../hooks/useStreamFetch';
+import { apiFetch } from '../../lib/api';
+import { SyllabusRow } from '../../types';
+import { cn } from '../../lib/utils';
 import { motion } from 'motion/react';
-import { MarkdownRenderer } from './MarkdownRenderer';
+import { MarkdownRenderer } from '../ui/MarkdownRenderer';
 
 interface NotesTabProps {
   courseId: string;
@@ -22,8 +22,10 @@ export function NotesTab({ courseId, syllabus, topicNotes, onTopicNotesChange }:
   useEffect(() => {
     if (topicNotes.length > 0 && !activeTopicNoteId) {
       setActiveTopicNoteId(topicNotes[0].topic_id);
+    } else if (syllabus.length > 0 && !activeTopicNoteId) {
+      setActiveTopicNoteId(syllabus[0].id);
     }
-  }, [topicNotes]);
+  }, [topicNotes, syllabus, activeTopicNoteId]);
 
   useEffect(() => {
     if (activeTopicNoteId) {
@@ -41,8 +43,24 @@ export function NotesTab({ courseId, syllabus, topicNotes, onTopicNotesChange }:
       await fetchSSEWithRetry(`/api/courses/${courseId}/topic-notes/${topicId}/generate`, {}, {
         onEvent: (data) => {
           if (data.type === 'done') {
-            setActiveTopicNote(prev => prev ? { ...prev, content: data.content, exercises: data.exercises, status: 'generated' } : null);
-            onTopicNotesChange?.(topicNotes.map(n => n.topic_id === topicId ? { ...n, status: 'generated' } : n));
+            const topic = syllabus.find(s => s.id === topicId);
+            const updatedNote = {
+              ...(activeTopicNote || {}),
+              topic_id: topicId,
+              course_id: courseId,
+              week: topic?.week,
+              topic: topic?.topic,
+              content: data.content,
+              exercises: data.exercises,
+              status: 'generated',
+            };
+            setActiveTopicNote(updatedNote);
+            const exists = topicNotes.some(n => n.topic_id === topicId);
+            onTopicNotesChange?.(
+              exists
+                ? topicNotes.map(n => n.topic_id === topicId ? { ...n, ...updatedNote } : n)
+                : [...topicNotes, updatedNote]
+            );
           }
         }
       });

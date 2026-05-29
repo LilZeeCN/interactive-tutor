@@ -18,10 +18,12 @@ import { progressRouter } from './routes/progress.js';
 import { versionsRouter } from './routes/versions.js';
 import { exportRouter } from './routes/export.js';
 import { reviewItemsRouter } from './routes/reviewItems.js';
+import { authRouter } from './routes/auth.js';
 import { TerminalManager } from './terminal/manager.js';
 import { workspace } from './services/workspace.js';
 import { asyncHandler } from './helpers/asyncHandler.js';
-import { authMiddleware, getSessionToken } from './middleware/auth.js';
+import { authMiddleware } from './middleware/auth.js';
+import { isAuthConfigured, verifyToken } from './services/auth.js';
 import { drainTasks } from './helpers/taskTracker.js';
 import { recoverPendingGenerations } from './services/generator.js';
 
@@ -56,16 +58,49 @@ function rateLimit(maxRequests: number, windowMs: number) {
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 
-export function createApp() {
+export async function createApp() {
   // Initialize database
   getDb();
 
-  // Recover interrupted generation tasks from previous sessions
-  recoverPendingGenerations().catch(err => console.error('[recovery] Startup recovery failed:', err));
+  // Verify API key integrity
+  const db = getDb();
+  console.log(`[startup] ENCRYPTION_KEY present: ${!!process.env.ENCRYPTION_KEY}, length: ${process.env.ENCRYPTION_KEY?.length || 0}`);
+  const apiKeyRow = db.prepare("SELECT value FROM settings WHERE key = 'api_key'").get() as { value: string } | undefined;
+  if (apiKeyRow?.value) {
+    const crypto = await import('crypto');
+    const { verifyStoredKey } = await import('./services/crypto.js');
+    const valid = verifyStoredKey(apiKeyRow.value);
+    const currentFingerprint = crypto.createHash('sha256').update(process.env.ENCRYPTION_KEY!).digest('hex').slice(0, 16);
+    const storedFingerprint = (db.prepare("SELECT value FROM settings WHERE key = 'encryption_fingerprint'").get() as { value: string } | undefined)?.value;
+    if (!valid) {
+      const reason = storedFingerprint && storedFingerprint !== currentFingerprint
+        ? `ENCRYPTION_KEY changed (was ${storedFingerprint}, now ${currentFingerprint})`
+        : 'unknown — encryption key mismatch';
+      console.warn(`[startup] API Key decryption failed — ${reason}. Clearing corrupted key.`);
+      db.prepare("DELETE FROM settings WHERE key = 'api_key'").run();
+      db.prepare("UPDATE courses SET generation_error = 'API Key 失效，请重新在设置中保存' WHERE id IN (SELECT c.id FROM courses c WHERE NOT EXISTS (SELECT 1 FROM syllabus s WHERE s.course_id = c.id))").run();
+    } else {
+      console.log(`[startup] API Key verified OK (fingerprint: ${currentFingerprint})`);
+    }
+  } else {
+    console.log('[startup] No API Key configured — run in Settings first');
+  }
+
+  // Check if API key exists before running recovery
+  const hasApiKey = () => {
+    const row = db.prepare("SELECT value FROM settings WHERE key = 'api_key'").get() as { value: string } | undefined;
+    return !!row?.value;
+  };
+
+  if (hasApiKey()) {
+    recoverPendingGenerations().catch(err => console.error('[recovery] Startup recovery failed:', err));
+  }
 
   // Periodically check for stalled generation tasks (every 5 minutes)
   setInterval(() => {
-    recoverPendingGenerations().catch(err => console.error('[recovery] Periodic recovery failed:', err));
+    if (hasApiKey()) {
+      recoverPendingGenerations().catch(err => console.error('[recovery] Periodic recovery failed:', err));
+    }
   }, 5 * 60_000);
 
   const app = express();
@@ -94,9 +129,19 @@ export function createApp() {
     next();
   });
 
-  // Bootstrap endpoint — serves the session auth token to the client (no auth needed)
+  // ── Request logging middleware ──
+  app.use((req, res, next) => {
+    const start = Date.now();
+    res.on('finish', () => {
+      const duration = Date.now() - start;
+      console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} ${res.statusCode} ${duration}ms`);
+    });
+    next();
+  });
+
+  // Bootstrap endpoint — returns auth status (public, no auth needed)
   app.get('/api/bootstrap', (_req, res) => {
-    res.json({ token: getSessionToken() });
+    res.json({ configured: isAuthConfigured() });
   });
 
   // Auth middleware — applied AFTER bootstrap endpoint only
@@ -108,31 +153,42 @@ export function createApp() {
     res.json({ token: terminalToken });
   });
 
-  // Routes — AI generation endpoints get rate limiting (30 req/min), data reads are unrestricted
+  // Routes — non-rate-limited data routers first, then AI-limited ones
   const aiLimiter = rateLimit(30, 60_000);
   app.use('/api/courses', coursesRouter);
-  app.use('/api/chat', aiLimiter, chatRouter);
+  app.use('/api/auth', authRouter);
   app.use('/api/courses', contentRouter);
+  app.use('/api/courses', lecturesRouter);
+  app.use('/api/courses', progressRouter);
+  app.use('/api/courses', versionsRouter);
+  app.use('/api/courses', exportRouter);
   app.use('/api/settings', settingsRouter);
-  app.use('/api/review', aiLimiter, reviewRouter);
   app.use('/api/workspace', workspaceRouter);
   app.get('/api/environment/detect', asyncHandler(async (_req, res) => {
     const { detectAllRuntimes } = await import('./services/environment.js');
     const runtimes = await detectAllRuntimes();
     res.json(runtimes);
   }));
+  // AI/heavy endpoints — rate limited (30 req/min per IP)
+  app.use('/api/chat', aiLimiter, chatRouter);
+  app.use('/api/review', aiLimiter, reviewRouter);
   app.use('/api/courses', aiLimiter, environmentRouter);
-  app.use('/api/courses', lecturesRouter);
-  app.use('/api/courses', progressRouter);
-  app.use('/api/courses', versionsRouter);
-  app.use('/api/courses', exportRouter);
   app.use('/api/courses', aiLimiter, reviewItemsRouter);
 
-  // Global error handler (must be after all routes)
-  app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-    console.error('Unhandled error:', err);
+  // ── Global error handler (must be after all routes) ──
+  app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    const correlationId = randomBytes(4).toString('hex');
+    console.error(`[${correlationId}] Unhandled error on ${req.method} ${req.path}:`, err);
     if (!res.headersSent) {
-      res.status(500).json({ error: '服务器内部错误' });
+      const body: Record<string, string> = {
+        error: '服务器内部错误',
+        correlationId,
+        timestamp: new Date().toISOString(),
+      };
+      if (process.env.NODE_ENV !== 'production') {
+        body.message = err.message;
+      }
+      res.status(500).json(body);
     }
   });
 
@@ -147,9 +203,9 @@ export function createApp() {
       ws.close(4001, 'Invalid terminal token');
       return;
     }
-    // Also validate auth session token
+    // Also validate JWT token
     const authToken = url.searchParams.get('auth');
-    if (authToken !== getSessionToken()) {
+    if (!authToken || !verifyToken(authToken)) {
       ws.close(4003, '请先登录');
       return;
     }
@@ -193,7 +249,7 @@ export function createApp() {
 
 // Auto-start when run directly (not imported)
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const { server, terminalManager } = createApp();
+  const { server, terminalManager } = await createApp();
 
   server.listen(PORT, () => {
     console.log(`🚀 Backend server running on http://localhost:${PORT}`);

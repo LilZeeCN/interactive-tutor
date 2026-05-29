@@ -157,20 +157,21 @@ function listTree(dirPath: string): FileNode[] {
   return buildTree(dirPath, '');
 }
 
-async function listTreeAsync(dirPath: string): Promise<FileNode[]> {
+async function listTreeAsync(dirPath: string, relPath = ''): Promise<FileNode[]> {
   try {
     const items = await readdir(dirPath);
     const nodes: FileNode[] = [];
     for (const item of items) {
       if (item.startsWith('.')) continue;
       const fullPath = join(dirPath, item);
+      const itemRelPath = relPath ? `${relPath}/${item}` : item;
       try {
         const itemStat = await stat(fullPath);
         if (itemStat.isDirectory()) {
-          const children = await listTreeAsync(fullPath);
-          nodes.push({ name: item, path: item, type: 'directory', children });
+          const children = await listTreeAsync(fullPath, itemRelPath);
+          nodes.push({ name: item, path: itemRelPath, type: 'directory', children });
         } else {
-          nodes.push({ name: item, path: item, type: 'file' });
+          nodes.push({ name: item, path: itemRelPath, type: 'file' });
         }
       } catch {
         // skip unreadable items

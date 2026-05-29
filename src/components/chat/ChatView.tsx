@@ -1,11 +1,11 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { ArrowUp, User, Sparkles, Activity, Plus, MessageSquare, BookOpen, Code, Terminal, Hash, Loader2, Trash2, ChevronDown, ChevronRight, Brain, X, Square } from 'lucide-react';
-import { fetchSSEWithRetry } from '../hooks/useStreamFetch';
-import { ReconnectingIndicator } from './ReconnectingIndicator';
-import { Message, TopicType, TopicWithIcon } from '../types';
-import { MarkdownRenderer } from './MarkdownRenderer';
-import { cn } from '../lib/utils';
-import { apiFetch } from '../lib/api';
+import { fetchSSEWithRetry } from '../../hooks/useStreamFetch';
+import { ReconnectingIndicator } from '../layout/ReconnectingIndicator';
+import { Message, TopicType, TopicWithIcon } from '../../types';
+import { MarkdownRenderer } from '../ui/MarkdownRenderer';
+import { cn } from '../../lib/utils';
+import { apiFetch } from '../../lib/api';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface ChatViewProps {

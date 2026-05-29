@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { CheckCircle2, XCircle, Loader2, Sparkles, Terminal, ChevronDown, ChevronUp } from 'lucide-react';
-import { apiFetch, authFetchInit } from '../lib/api';
+import { apiFetch, authFetchInit } from '../../lib/api';
 
 interface RuntimeInfo {
   name: string;

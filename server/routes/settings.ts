@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { createHash } from 'crypto';
 import { getDb } from '../db.js';
 import { encrypt, decrypt } from '../services/crypto.js';
 import { invalidateAISettingsCache, detectProvider } from '../services/ai.js';
@@ -74,7 +75,20 @@ settingsRouter.put('/', (req: Request, res: Response) => {
     }
     upsert.run('api_url', api_url, api_url);
   }
-  if (api_key !== undefined) upsert.run('api_key', encrypt(api_key), encrypt(api_key));
+  if (api_key !== undefined) {
+    const encrypted = encrypt(api_key);
+    upsert.run('api_key', encrypted, encrypted);
+    // Store ENCRYPTION_KEY fingerprint so we can detect changes across restarts
+    const fingerprint = createHash('sha256').update(process.env.ENCRYPTION_KEY!).digest('hex').slice(0, 16);
+    upsert.run('encryption_fingerprint', fingerprint, fingerprint);
+    // Immediately verify roundtrip
+    try {
+      decrypt(encrypted);
+      console.log(`[settings] API key saved and verified OK (fingerprint: ${fingerprint})`);
+    } catch (e) {
+      console.error('[settings] FATAL: Roundtrip decryption failed:', e);
+    }
+  }
   if (model !== undefined) upsert.run('model', model, model);
   if (api_provider !== undefined) upsert.run('api_provider', api_provider, api_provider);
 
@@ -101,7 +115,8 @@ settingsRouter.post('/test', async (_req: Request, res: Response) => {
     let apiKey: string;
     try {
       apiKey = decrypt(row.value);
-    } catch {
+    } catch (err) {
+      console.error('[settings/test] API Key decrypt failed:', err);
       res.status(400).json({ success: false, error: 'API Key 解密失败，请重新配置 API Key' });
       return;
     }

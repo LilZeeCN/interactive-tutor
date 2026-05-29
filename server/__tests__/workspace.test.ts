@@ -111,6 +111,20 @@ describe('workspace file operations', () => {
     expect(dir?.children).toHaveLength(1);
   });
 
+  it('listTreeAsync preserves nested relative paths', async () => {
+    workspace.writeFiles(TEST_ROOT, {
+      'src/B.java': 'class B {}',
+      'src/nested/A.java': 'class A {}',
+    });
+    const tree = await workspace.listTreeAsync(TEST_ROOT);
+    const src = tree.find(n => n.name === 'src');
+    const nested = src?.children?.find(n => n.name === 'nested');
+    const file = nested?.children?.find(n => n.name === 'A.java');
+    expect(src?.path).toBe('src');
+    expect(nested?.path).toBe('src/nested');
+    expect(file?.path).toBe('src/nested/A.java');
+  });
+
   it('deleteFile removes file', () => {
     workspace.writeFiles(TEST_ROOT, { 'x.txt': 'x' });
     expect(workspace.deleteFile(TEST_ROOT, 'x.txt')).toBe(true);

@@ -4,14 +4,14 @@ import {
   ArrowUp, Sparkles, User, X, Brain, CheckCircle2,
   History, Download, RotateCcw, Square
 } from 'lucide-react';
-import { MarkdownRenderer } from './MarkdownRenderer';
+import { MarkdownRenderer } from '../ui/MarkdownRenderer';
 import { HtmlLectureRenderer } from './HtmlLectureRenderer';
-import { SkeletonArticle } from './Skeleton';
-import { fetchSSEWithRetry } from '../hooks/useStreamFetch';
-import { ReconnectingIndicator } from './ReconnectingIndicator';
-import { cn } from '../lib/utils';
-import { apiFetch } from '../lib/api';
-import { Message, LectureSection } from '../types';
+import { SkeletonArticle } from '../layout/Skeleton';
+import { fetchSSEWithRetry } from '../../hooks/useStreamFetch';
+import { ReconnectingIndicator } from '../layout/ReconnectingIndicator';
+import { cn } from '../../lib/utils';
+import { apiFetch, authFetchInit } from '../../lib/api';
+import { Message, LectureSection } from '../../types';
 
 interface LectureViewProps {
   courseId: string;
@@ -70,7 +70,9 @@ export function LectureView({ courseId }: LectureViewProps) {
     return ch.sections.some(s => s.content && s.content.length > 50);
   };
 
-  const isChapterGenerating = (chapterNum: number) => generatingChapters.has(chapterNum);
+  const isChapterGenerating = (chapterNum: number) => {
+    return generatingChapters.has(chapterNum) || sections.some(s => s.chapter_num === chapterNum && s.status === 'generating');
+  };
 
   // Progress tracking
   const [progress, setProgress] = useState<Record<string, { status: string; time_spent_seconds: number }>>({});
@@ -145,11 +147,27 @@ export function LectureView({ courseId }: LectureViewProps) {
   };
 
   // Export markdown
-  const exportMarkdown = (chapterNum?: number) => {
+  const exportMarkdown = async (chapterNum?: number) => {
     const url = chapterNum
       ? `/api/courses/${courseId}/export/lectures?chapter=${chapterNum}`
       : `/api/courses/${courseId}/export/lectures?chapter=all`;
-    window.open(url, '_blank');
+    try {
+      const { headers } = await authFetchInit();
+      headers.delete('Content-Type');
+      const res = await fetch(url, { headers });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = chapterNum ? `第${chapterNum}章讲义.md` : '课程讲义.md';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(objectUrl);
+    } catch (err) {
+      console.error('[lectures] Export failed:', err);
+    }
   };
 
   // Load sections
@@ -157,36 +175,6 @@ export function LectureView({ courseId }: LectureViewProps) {
     try {
       const data = await apiFetch<LectureSection[]>(`/api/courses/${courseId}/lectures`);
       setSections(data);
-
-      // Auto expand first chapter
-      if (data.length > 0 && expandedChapters.size === 0) {
-        setExpandedChapters(new Set([data[0].chapter_num]));
-      }
-
-      // If no sections yet, trigger outline generation then poll
-      if (data.length === 0) {
-        apiFetch(`/api/courses/${courseId}/lectures/generate-outline`, { method: 'POST' }).catch(() => {});
-        let attempts = 0;
-        const poll = async () => {
-          attempts++;
-          try {
-            const updated = await apiFetch<LectureSection[]>(`/api/courses/${courseId}/lectures`);
-            if (updated.length > 0) {
-              setSections(updated);
-              setExpandedChapters(new Set([updated[0].chapter_num]));
-            } else if (attempts < 60) {
-              const delay = Math.min(3000 * Math.pow(1.3, attempts - 1), 15000);
-              pollTimeoutsRef.current.push(setTimeout(poll, delay));
-            }
-          } catch {
-            if (attempts < 60) {
-              const delay = Math.min(3000 * Math.pow(1.3, attempts - 1), 15000);
-              pollTimeoutsRef.current.push(setTimeout(poll, delay));
-            }
-          }
-        };
-        pollTimeoutsRef.current.push(setTimeout(poll, 3000));
-      }
     } catch {
       // ignore
     } finally {
@@ -195,6 +183,29 @@ export function LectureView({ courseId }: LectureViewProps) {
   }, [courseId]);
 
   useEffect(() => { loadSections(); }, [loadSections]);
+
+  useEffect(() => {
+    const generatingChapterNums = new Set(
+      sections.filter(s => s.status === 'generating').map(s => s.chapter_num)
+    );
+    setGeneratingChapters(prev => {
+      const next = new Set<number>();
+      for (const chapterNum of prev) {
+        if (generatingChapterNums.has(chapterNum)) next.add(chapterNum);
+      }
+      for (const chapterNum of generatingChapterNums) next.add(chapterNum);
+      if (next.size === prev.size && [...next].every(chapterNum => prev.has(chapterNum))) return prev;
+      return next;
+    });
+  }, [sections]);
+
+  useEffect(() => {
+    if (!sections.some(s => s.status === 'generating')) return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === 'visible') loadSections();
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [sections, loadSections]);
 
   // Cleanup all pending poll timeouts on unmount
   useEffect(() => {
@@ -215,6 +226,11 @@ export function LectureView({ courseId }: LectureViewProps) {
   // Generate all sections for a chapter
   const generateChapter = async (chapterNum: number) => {
     setGeneratingChapters(prev => new Set(prev).add(chapterNum));
+    setSections(prev => prev.map(s =>
+      s.chapter_num === chapterNum && !(s.content && s.content.length > 50)
+        ? { ...s, status: 'generating' }
+        : s
+    ));
 
     try {
       await apiFetch(`/api/courses/${courseId}/lectures/generate-chapter/${chapterNum}`, { method: 'POST' });
@@ -229,9 +245,10 @@ export function LectureView({ courseId }: LectureViewProps) {
 
           const chapterSections = updated.filter(s => s.chapter_num === chapterNum);
           const allDone = chapterSections.every(s => s.status === 'done');
+          const anyError = chapterSections.some(s => s.status === 'error');
           const anyGenerating = chapterSections.some(s => s.status === 'generating');
 
-          if (allDone || (!anyGenerating && attempts > 3)) {
+          if (allDone || anyError) {
             setGeneratingChapters(prev => { const n = new Set(prev); n.delete(chapterNum); return n; });
           } else if (attempts < 60) {
             const delay = Math.min(3000 * Math.pow(1.3, attempts - 1), 15000);
@@ -447,7 +464,11 @@ export function LectureView({ courseId }: LectureViewProps) {
               <div className="flex items-center gap-1">
                 <button
                   onClick={() => {
-                    if (!generated) {
+                    if (generating) {
+                      // Just toggle expand/collapse while generating
+                      toggleChapter(ch.chapterNum);
+                      setPendingChapter(null);
+                    } else if (!generated) {
                       if (expandedChapters.has(ch.chapterNum)) {
                         toggleChapter(ch.chapterNum);
                         setPendingChapter(null);

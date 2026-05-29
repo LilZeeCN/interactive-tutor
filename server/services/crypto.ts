@@ -6,7 +6,7 @@ const IV_LENGTH = 16;
 function getEncryptionKey(): Buffer {
   const secret = process.env.ENCRYPTION_KEY;
   if (!secret) {
-    console.error('FATAL: ENCRYPTION_KEY environment variable is not set. Refusing to start with insecure defaults.');
+    console.error('FATAL: ENCRYPTION_KEY environment variable is not set.');
     process.exit(1);
   }
   return createHash('sha256').update(secret).digest();
@@ -18,7 +18,6 @@ export function encrypt(plaintext: string): string {
   const cipher = createCipheriv(ALGORITHM, key, iv);
   const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
   const authTag = cipher.getAuthTag();
-  // Format: iv:authTag:ciphertext (all base64)
   return `${iv.toString('base64')}:${authTag.toString('base64')}:${encrypted.toString('base64')}`;
 }
 
@@ -26,9 +25,8 @@ export function decrypt(ciphertext: string): string {
   const key = getEncryptionKey();
   const parts = ciphertext.split(':');
   if (parts.length !== 3) {
-    // Plaintext fallback (backward compat) — log warning so operators notice
     if (ciphertext.length > 0) {
-      console.warn('[crypto] WARNING: decrypt() received non-encrypted value. This should be migrated to encrypted storage.');
+      console.warn('[crypto] WARNING: decrypt() received non-encrypted value.');
     }
     return ciphertext;
   }
@@ -45,4 +43,14 @@ export function isEncrypted(value: string): boolean {
   return parts.length === 3 && parts.every(p => {
     try { return Buffer.from(p, 'base64').length > 0; } catch { return false; }
   });
+}
+
+/** Verify the stored API key can be decrypted. Returns true if OK, false if corrupted. */
+export function verifyStoredKey(encryptedValue: string): boolean {
+  try {
+    decrypt(encryptedValue);
+    return true;
+  } catch {
+    return false;
+  }
 }

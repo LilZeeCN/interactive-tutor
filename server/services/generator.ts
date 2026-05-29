@@ -3,6 +3,9 @@ import { getDb } from '../db.js';
 import { dbGet, dbAll } from '../db-types.js';
 import { generateText } from './ai.js';
 import { buildSyllabusPrompt } from '../prompts/syllabus.js';
+
+// In-memory lock to prevent concurrent generation for the same chapter
+const activeGeneration = new Set<string>();
 import { buildLabListPrompt, buildLabDetailPrompt } from '../prompts/labs.js';
 import { buildProjectListPrompt, buildProjectDetailPrompt } from '../prompts/projects.js';
 import { buildLectureOutlinePrompt, buildLectureSectionPrompt, type LectureStyle, type ContentType } from '../prompts/lectures.js';
@@ -24,8 +27,100 @@ interface CourseInput {
   createdAt: string;
 }
 
+const detailGenerationControllers = new Map<string, AbortController>();
+const chapterGenerationControllers = new Map<string, AbortController>();
+
+function detailKey(type: 'lab' | 'project', id: string): string {
+  return `${type}:${id}`;
+}
+
+function chapterKey(courseId: string, chapterNum: number): string {
+  return `${courseId}:ch${chapterNum}`;
+}
+
+function isAbortError(err: unknown): boolean {
+  if (err instanceof Error) {
+    return err.name === 'AbortError' || err.message === 'Aborted' || err.message === 'Generation cancelled';
+  }
+  return false;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new Error('Generation cancelled');
+}
+
+export function startLabDetailGeneration(courseId: string, labId: string): { started: boolean; promise?: Promise<void> } {
+  const key = detailKey('lab', labId);
+  if (detailGenerationControllers.has(key)) return { started: false };
+
+  const abortCtrl = new AbortController();
+  detailGenerationControllers.set(key, abortCtrl);
+  const promise = generateLabDetail(courseId, labId, abortCtrl.signal)
+    .finally(() => {
+      if (detailGenerationControllers.get(key) === abortCtrl) {
+        detailGenerationControllers.delete(key);
+      }
+    });
+  return { started: true, promise };
+}
+
+export function startProjectDetailGeneration(courseId: string, projectId: string): { started: boolean; promise?: Promise<void> } {
+  const key = detailKey('project', projectId);
+  if (detailGenerationControllers.has(key)) return { started: false };
+
+  const abortCtrl = new AbortController();
+  detailGenerationControllers.set(key, abortCtrl);
+  const promise = generateProjectDetail(courseId, projectId, abortCtrl.signal)
+    .finally(() => {
+      if (detailGenerationControllers.get(key) === abortCtrl) {
+        detailGenerationControllers.delete(key);
+      }
+    });
+  return { started: true, promise };
+}
+
+export function cancelLabDetailGeneration(labId: string): boolean {
+  const controller = detailGenerationControllers.get(detailKey('lab', labId));
+  if (!controller) return false;
+  controller.abort();
+  return true;
+}
+
+export function cancelProjectDetailGeneration(projectId: string): boolean {
+  const controller = detailGenerationControllers.get(detailKey('project', projectId));
+  if (!controller) return false;
+  controller.abort();
+  return true;
+}
+
+export function startChapterContentGeneration(courseId: string, chapterNum: number): { started: boolean; promise?: Promise<void> } {
+  const key = chapterKey(courseId, chapterNum);
+  if (chapterGenerationControllers.has(key)) return { started: false };
+
+  const abortCtrl = new AbortController();
+  chapterGenerationControllers.set(key, abortCtrl);
+  const promise = generateChapterContent(courseId, chapterNum, abortCtrl.signal)
+    .finally(() => {
+      if (chapterGenerationControllers.get(key) === abortCtrl) {
+        chapterGenerationControllers.delete(key);
+      }
+    });
+  return { started: true, promise };
+}
+
+export function cancelChapterContentGeneration(courseId: string, chapterNum: number): boolean {
+  const controller = chapterGenerationControllers.get(chapterKey(courseId, chapterNum));
+  if (!controller) return false;
+  controller.abort();
+  return true;
+}
+
+export function wasGenerationCancelled(err: unknown): boolean {
+  return isAbortError(err);
+}
+
 // ===== Phase 1: 课程创建时只生成大纲（~5秒） =====
-export async function generateCourseOutline(course: CourseInput): Promise<void> {
+export async function generateCourseOutline(course: CourseInput, options: { forceLectureOutline?: boolean } = {}): Promise<void> {
   const db = getDb();
   console.log(`[outline] Generating syllabus for: ${course.title}`);
 
@@ -36,7 +131,11 @@ export async function generateCourseOutline(course: CourseInput): Promise<void> 
       4096
     );
     const syllabus = parseJSON(syllabusText) as any[];
-    if (Array.isArray(syllabus) && syllabus.length > 0) {
+    if (!Array.isArray(syllabus) || syllabus.length === 0) {
+      console.error(`[outline] Syllabus parse bad result: type=${typeof syllabus}, len=${Array.isArray(syllabus) ? syllabus.length : 'N/A'}, text=${syllabusText.slice(0, 300)}`);
+      throw new Error('Syllabus generation returned invalid data');
+    }
+    {
       const insert = db.prepare(
         'INSERT INTO syllabus (id, course_id, week, topic, readings, assignments, status) VALUES (?, ?, ?, ?, ?, ?, ?)'
       );
@@ -61,38 +160,48 @@ export async function generateCourseOutline(course: CourseInput): Promise<void> 
     }
   } catch (err) {
     console.error('[outline] Syllabus generation failed:', err);
+    throw err; // Re-throw so the caller's .catch() records generation_error
   }
 
-  console.log(`[outline] Done. Labs/projects will be created on demand.`);
-
-  // Generate lecture outline + Chapter 1 content (tracked for graceful shutdown)
+  // Generate lecture outline (section titles only, no content)
   try {
-    trackTask(
-      generateLectureOutline(course.id)
-        .then(() => generateChapterContent(course.id, 1))
-        .catch((err) => console.error('[outline] Chapter 1 generation failed:', err)),
-      'lecture-outline-ch1'
-    );
+    await generateLectureOutline(course.id, options);
+    console.log(`[outline] Done. Labs/projects will be created on demand.`);
   } catch (err) {
-    console.error('[outline] Lecture outline/chapter1 generation failed:', err);
+    console.error('[outline] Lecture outline generation failed:', err);
+    throw err;
   }
 }
 
 // ===== Generate lecture outline (all section titles) =====
-export async function generateLectureOutline(courseId: string): Promise<void> {
+export async function generateLectureOutline(courseId: string, options: { forceLectureOutline?: boolean } = {}): Promise<void> {
+  const lockKey = `${courseId}:outline`;
+  if (activeGeneration.has(lockKey)) {
+    console.log(`[lectures] Skipping outline — already generating for ${courseId}`);
+    return;
+  }
+  activeGeneration.add(lockKey);
+  try {
+    await _generateLectureOutline(courseId, options.forceLectureOutline === true);
+  } finally {
+    activeGeneration.delete(lockKey);
+  }
+}
+
+async function _generateLectureOutline(courseId: string, forceLectureOutline: boolean): Promise<void> {
   const db = getDb();
 
   const course = dbGet<{ title: string; description: string; content: string; requirements: string; lecture_style: string }>('SELECT title, description, content, requirements, lecture_style FROM courses WHERE id = ?', courseId);
-  if (!course) return;
+  if (!course) throw new Error('Course not found while generating lecture outline');
 
   const existing = dbGet<{ c: number }>('SELECT COUNT(*) as c FROM lectures WHERE course_id = ?', courseId);
-  if ((existing?.c ?? 0) > 0) return; // Already generated
+  if ((existing?.c ?? 0) > 0 && !forceLectureOutline) return; // Already generated
 
   const syllabus = dbAll<{ week: number; topic: string }>(
     'SELECT week, topic FROM syllabus WHERE course_id = ? ORDER BY week ASC', courseId
   );
 
-  if (syllabus.length === 0) return;
+  if (syllabus.length === 0) throw new Error('Cannot generate lecture outline without syllabus');
 
   const outlineText = await generateText(
     '你是一位资深的课程讲师和教材编写专家。请严格按照要求的 JSON 数组格式输出讲义章节结构，不要包含 markdown 代码块标记。',
@@ -101,13 +210,21 @@ export async function generateLectureOutline(courseId: string): Promise<void> {
   );
 
   const outline = parseJSON(outlineText) as any[];
-  if (!Array.isArray(outline) || outline.length === 0) return;
+  if (!Array.isArray(outline) || outline.length === 0) {
+    console.error(`[lectures] Outline parse bad result: type=${typeof outline}, len=${Array.isArray(outline) ? outline.length : 'N/A'}, text=${outlineText.slice(0, 300)}`);
+    throw new Error('Lecture outline generation returned invalid data');
+  }
 
   const insert = db.prepare(
     'INSERT INTO lectures (id, course_id, chapter_num, section_num, title, status, sort_order, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
   );
 
   db.transaction(() => {
+    if (forceLectureOutline) {
+      db.prepare('DELETE FROM lecture_progress WHERE course_id = ?').run(courseId);
+      db.prepare('DELETE FROM review_items WHERE course_id = ?').run(courseId);
+      db.prepare('DELETE FROM lectures WHERE course_id = ?').run(courseId);
+    }
     for (let i = 0; i < outline.length; i++) {
       const row = outline[i];
       insert.run(
@@ -127,8 +244,23 @@ export async function generateLectureOutline(courseId: string): Promise<void> {
 }
 
 // ===== Generate all sections' content for a specific chapter =====
-export async function generateChapterContent(courseId: string, chapterNum: number): Promise<void> {
+export async function generateChapterContent(courseId: string, chapterNum: number, abortSignal?: AbortSignal): Promise<void> {
+  const lockKey = chapterKey(courseId, chapterNum);
+  if (activeGeneration.has(lockKey)) {
+    console.log(`[lectures] Skipping chapter ${chapterNum} — already generating`);
+    return;
+  }
+  activeGeneration.add(lockKey);
+  try {
+    await _generateChapterContent(courseId, chapterNum, abortSignal);
+  } finally {
+    activeGeneration.delete(lockKey);
+  }
+}
+
+async function _generateChapterContent(courseId: string, chapterNum: number, abortSignal?: AbortSignal): Promise<void> {
   const db = getDb();
+  throwIfAborted(abortSignal);
 
   interface LectureRow {
     id: string; course_id: string; chapter_num: number; section_num: string;
@@ -164,11 +296,15 @@ export async function generateChapterContent(courseId: string, chapterNum: numbe
 
   async function generateNext(): Promise<void> {
     while (queue.length > 0) {
+      throwIfAborted(abortSignal);
       const lecture = queue.shift()!;
       try {
+        throwIfAborted(abortSignal);
         const parts = lecture.title.split(' / ');
         const chapterTitle = parts[0] || '';
         const sectionTitle = parts[1] || lecture.title;
+
+        db.prepare('UPDATE lectures SET status = ? WHERE id = ?').run('generating', lecture.id);
 
         // Get previous sections for context
         const prevSections = dbAll<{ section_num: string; title: string; content: string }>(
@@ -207,7 +343,8 @@ export async function generateChapterContent(courseId: string, chapterNum: numbe
             style: (course.lecture_style || 'khanmigo') as LectureStyle,
             contentType,
           }),
-          isHtml ? 16384 : 8192
+          isHtml ? 16384 : 8192,
+          abortSignal
         );
 
         let finalContent = content;
@@ -240,7 +377,7 @@ export async function generateChapterContent(courseId: string, chapterNum: numbe
             }) + '\n\n【重要】上次生成的 HTML 有以下问题：' + htmlValidation.errors.join('；') + '\n请确保：1) 输出完整的 <!DOCTYPE html> 到 </html>；2) 有 <body> 或内容丰富的 <div>；3) 中文内容至少 300 字符。';
 
             try {
-              const retryContent = await generateText(systemPrompt, retryPrompt, 16384);
+              const retryContent = await generateText(systemPrompt, retryPrompt, 16384, abortSignal);
               const retryValidation = validateLectureHtml(retryContent);
               if (retryValidation.valid) {
                 const { html, warnings } = sanitizeLectureHtml(retryContent);
@@ -264,7 +401,8 @@ export async function generateChapterContent(courseId: string, chapterNum: numbe
                     style: (course.lecture_style || 'khanmigo') as LectureStyle,
                     contentType: 'markdown',
                   }),
-                  8192
+                  8192,
+                  abortSignal
                 );
                 finalContent = mdContent;
                 finalContentType = 'markdown';
@@ -272,6 +410,7 @@ export async function generateChapterContent(courseId: string, chapterNum: numbe
                 validationStatus = mdValidation.valid ? 'valid' : 'invalid';
               }
             } catch (retryErr) {
+              if (wasGenerationCancelled(retryErr)) throw retryErr;
               console.error(`[lectures] HTML retry threw for ${lecture.section_num}:`, retryErr);
               finalContent = content;
               finalContentType = 'markdown';
@@ -299,7 +438,8 @@ export async function generateChapterContent(courseId: string, chapterNum: numbe
             const retryContent = await generateText(
               '你是一位善于教学的资深讲师。请严格按照要求的 Markdown 结构输出讲义内容。你必须确保内容中包含学习目标、核心讲解、常见误区、练习检验等完整部分。',
               stricterPrompt,
-              8192
+              8192,
+              abortSignal
             );
 
             const retryValidation = validateLectureContent(retryContent);
@@ -315,8 +455,9 @@ export async function generateChapterContent(courseId: string, chapterNum: numbe
           .run(finalContent, finalContentType, finalSummary, 'done', validationStatus, lecture.id);
         console.log(`[lectures] Generated: ${lecture.section_num} (type: ${finalContentType}, validation: ${validationStatus})`);
       } catch (err) {
+        if (wasGenerationCancelled(err)) throw err;
         console.error(`[lectures] Generation failed for ${lecture.section_num}:`, err);
-        db.prepare('UPDATE lectures SET status = ? WHERE id = ?').run('pending', lecture.id);
+        db.prepare('UPDATE lectures SET status = ? WHERE id = ?').run('error', lecture.id);
       }
     }
   }
@@ -351,8 +492,19 @@ export async function createAndGenerateLab(courseId: string, syllabusRowId: stri
   })();
 
   // Generate detail in background
-  generateLabDetail(courseId, labId).catch(err => {
+  const generation = startLabDetailGeneration(courseId, labId);
+  generation.promise?.catch(err => {
+    if (wasGenerationCancelled(err)) {
+      console.warn(`Lab generation cancelled: ${labId}`);
+      return;
+    }
     console.error(`Lab generation failed: ${labId}`, err);
+    const db = getDb();
+    const message = err instanceof Error ? err.message : String(err);
+    db.prepare("UPDATE labs SET instructions = ? WHERE id = ? AND course_id = ?").run(
+      JSON.stringify({ error: true, message: message || 'AI 生成失败，请重试' }),
+      labId, courseId
+    );
   });
 
   return labId;
@@ -382,27 +534,46 @@ export async function createAndGenerateProject(courseId: string, syllabusRowId: 
     }
   })();
 
-  generateProjectDetail(courseId, projId).catch(err => {
+  const generation = startProjectDetailGeneration(courseId, projId);
+  generation.promise?.catch(err => {
+    if (wasGenerationCancelled(err)) {
+      console.warn(`Project generation cancelled: ${projId}`);
+      return;
+    }
     console.error(`Project generation failed: ${projId}`, err);
+    const db = getDb();
+    const message = err instanceof Error ? err.message : String(err);
+    db.prepare("UPDATE projects SET starter_code = ? WHERE id = ? AND course_id = ?").run(
+      JSON.stringify({ error: true, message: message || 'AI 生成失败，请重试' }),
+      projId, courseId
+    );
   });
 
   return projId;
 }
 
 // ===== Phase 2: 按需生成单个 Lab 详情 =====
-export async function generateLabDetail(courseId: string, labId: string): Promise<void> {
+export async function generateLabDetail(courseId: string, labId: string, abortSignal?: AbortSignal): Promise<void> {
   const db = getDb();
+  throwIfAborted(abortSignal);
 
   const lab = dbGet<{ id: string; title: string; topic: string; instructions: string; week: number }>('SELECT * FROM labs WHERE id = ? AND course_id = ?', labId, courseId);
   if (!lab) throw new Error('Lab not found');
 
-  // Skip if already generated
+  // Skip if already generated, but allow retry after a previous error marker.
   if (lab.instructions && lab.instructions.length > 10) {
-    console.log(`[lab-detail] Lab "${lab.title}" already has content, skipping`);
-    return;
+    const parsed = safeJSONParse(lab.instructions, null);
+    if (parsed?.error) {
+      console.log(`[lab-detail] Retrying failed lab: ${lab.title}`);
+      db.prepare("UPDATE labs SET instructions = '', starter_code = '', test_cases = '[]' WHERE id = ? AND course_id = ?").run(labId, courseId);
+    } else {
+      console.log(`[lab-detail] Lab "${lab.title}" already has content, skipping`);
+      return;
+    }
   }
 
   const course = dbGet<{ title: string; description: string; content: string }>('SELECT title, description, content FROM courses WHERE id = ?', courseId);
+  if (!course) throw new Error('Course not found');
   const syllabusRows = dbAll<{ week: number; topic: string }>('SELECT week, topic FROM syllabus WHERE course_id = ? ORDER BY week ASC', courseId);
   const existingLabs = dbAll<{ title: string }>('SELECT title FROM labs WHERE course_id = ? AND id != ?', courseId, labId);
 
@@ -420,6 +591,7 @@ export async function generateLabDetail(courseId: string, labId: string): Promis
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
+      throwIfAborted(abortSignal);
       const detailText = await generateText(
         '你是一位资深的课程讲师和编程教育专家。请严格按照要求的 JSON 格式输出，不要包含 markdown 代码块标记。',
         buildLabDetailPrompt({
@@ -431,11 +603,14 @@ export async function generateLabDetail(courseId: string, labId: string): Promis
           syllabusTopics,
           previousLabs,
         }),
-        16384
+        16384,
+        abortSignal
       );
+      throwIfAborted(abortSignal);
       detail = parseJSON(detailText) as any;
       break;
     } catch (err) {
+      if (isAbortError(err)) throw err;
       lastError = err as Error;
       console.warn(`[lab-detail] Attempt ${attempt}/${maxAttempts} failed for ${lab.title}: ${lastError.message}`);
     }
@@ -443,12 +618,14 @@ export async function generateLabDetail(courseId: string, labId: string): Promis
 
   if (!detail) throw lastError!;
 
+  throwIfAborted(abortSignal);
   db.prepare(
-    'UPDATE labs SET instructions = ?, starter_code = ?, test_cases = ? WHERE id = ? AND course_id = ?'
+    'UPDATE labs SET instructions = ?, starter_code = ?, test_cases = ?, status = ? WHERE id = ? AND course_id = ?'
   ).run(
     detail?.instructions || '',
     JSON.stringify(detail?.starter_code || {}),
     JSON.stringify(detail?.test_cases || []),
+    'pending',
     labId, courseId
   );
 
@@ -465,8 +642,9 @@ export async function generateLabDetail(courseId: string, labId: string): Promis
 }
 
 // ===== Phase 2: 按需生成单个 Project 详情 =====
-export async function generateProjectDetail(courseId: string, projectId: string): Promise<void> {
+export async function generateProjectDetail(courseId: string, projectId: string, abortSignal?: AbortSignal): Promise<void> {
   const db = getDb();
+  throwIfAborted(abortSignal);
 
   const proj = dbGet<{ id: string; title: string; description: string; starter_code: string }>('SELECT * FROM projects WHERE id = ? AND course_id = ?', projectId, courseId);
   if (!proj) throw new Error('Project not found');
@@ -507,6 +685,7 @@ export async function generateProjectDetail(courseId: string, projectId: string)
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
+      throwIfAborted(abortSignal);
       const detailText = await generateText(
         '你是一位资深的课程讲师和编程教育专家。请严格按照要求的 JSON 格式输出，不要包含 markdown 代码块标记。',
         buildProjectDetailPrompt({
@@ -516,11 +695,14 @@ export async function generateProjectDetail(courseId: string, projectId: string)
           syllabusTopics,
           completedLabs: completedLabsStr,
         }),
-        16384
+        16384,
+        abortSignal
       );
+      throwIfAborted(abortSignal);
       detail = parseJSON(detailText) as any;
       break;
     } catch (err) {
+      if (isAbortError(err)) throw err;
       lastError = err as Error;
       console.warn(`[proj-detail] Attempt ${attempt}/${maxAttempts} failed for ${proj.title}: ${lastError.message}`);
     }
@@ -528,12 +710,14 @@ export async function generateProjectDetail(courseId: string, projectId: string)
 
   if (!detail) throw lastError!;
 
+  throwIfAborted(abortSignal);
   db.prepare(
-    'UPDATE projects SET description = ?, milestones = ?, starter_code = ? WHERE id = ? AND course_id = ?'
+    'UPDATE projects SET description = ?, milestones = ?, starter_code = ?, status = ? WHERE id = ? AND course_id = ?'
   ).run(
     detail?.description || proj.description || '',
     JSON.stringify(detail?.milestones || []),
     JSON.stringify(detail?.starter_code || {}),
+    'pending',
     projectId, courseId
   );
 
@@ -623,42 +807,20 @@ export async function recoverPendingGenerations(): Promise<void> {
     recovered++;
   }
 
-  // Step 2: Courses with syllabus but no lecture outline
+  // Step 2: Courses with syllabus but no lecture outline — generate outline only
   const noLectures = dbAll<{ id: string }>(
     `SELECT c.id FROM courses c
      WHERE c.id IN (SELECT DISTINCT course_id FROM syllabus)
      AND c.id NOT IN (SELECT DISTINCT course_id FROM lectures)`
   );
-  // Exclude courses already handled by step 1
   const noSyllabusIds = new Set(noSyllabus.map(c => c.id));
   const noLecturesFiltered = noLectures.filter(c => !noSyllabusIds.has(c.id));
   for (const c of noLecturesFiltered) {
-    console.log(`[recovery] ${c.id} — has syllabus but no lectures, generating outline + chapter 1`);
+    console.log(`[recovery] ${c.id} — has syllabus but no lectures, generating outline`);
     trackTask(
       generateLectureOutline(c.id)
-        .then(() => generateChapterContent(c.id, 1))
-        .catch(err => console.error(`[recovery] Lectures failed for ${c.id}:`, err)),
+        .catch(err => console.error(`[recovery] Lecture outline failed for ${c.id}:`, err)),
       `recovery-lectures-${c.id}`
-    );
-    recovered++;
-  }
-
-  // Step 3: Courses with incomplete chapter 1 (sections stuck in pending/generating)
-  const incompleteCh1 = dbAll<{ course_id: string }>(
-    `SELECT DISTINCT l.course_id FROM lectures l
-     INNER JOIN courses c ON c.id = l.course_id
-     WHERE l.chapter_num = 1 AND l.status IN ('pending', 'generating')`
-  );
-  const noLecturesIds = new Set(noLecturesFiltered.map(c => c.id));
-  for (const { course_id } of incompleteCh1) {
-    // Skip if already handled by step 1 or 2
-    if (noSyllabusIds.has(course_id) || noLecturesIds.has(course_id)) continue;
-
-    console.log(`[recovery] ${course_id} — chapter 1 incomplete, resuming generation`);
-    trackTask(
-      generateChapterContent(course_id, 1)
-        .catch(err => console.error(`[recovery] Chapter 1 failed for ${course_id}:`, err)),
-      `recovery-ch1-${course_id}`
     );
     recovered++;
   }

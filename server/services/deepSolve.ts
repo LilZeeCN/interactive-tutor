@@ -85,12 +85,14 @@ function classifyQuestion(question: string): boolean {
 async function planSubGoals(
   question: string,
   context: string,
+  abortSignal?: AbortSignal,
 ): Promise<SubGoal[]> {
   const prompt = buildPlannerPrompt(question, context);
   const result = await generateText(
     '你是一个教学规划专家，输出严格的 JSON 数组。',
     prompt,
     4096,  // Reasoning models need more tokens for planning
+    abortSignal,
   );
 
   const parsed = parseJSON(result);
@@ -115,6 +117,7 @@ async function solveSubGoal(
   previousResults: SubResult[],
   context: string,
   teachingStyle: string,
+  abortSignal?: AbortSignal,
 ): Promise<string> {
   const prompt = buildSolverPrompt(
     originalQuestion,
@@ -127,6 +130,7 @@ async function solveSubGoal(
     `你是一个${teachingStyle}风格的AI教师。`,
     prompt,
     2048,
+    abortSignal,
   );
 }
 
@@ -137,6 +141,7 @@ async function synthesizeAnswer(
   results: SubResult[],
   context: string,
   teachingStyle: string,
+  abortSignal?: AbortSignal,
 ): Promise<string> {
   const prompt = buildWriterPrompt(
     originalQuestion,
@@ -149,6 +154,7 @@ async function synthesizeAnswer(
     `你是一个${teachingStyle}风格的AI教师。`,
     prompt,
     4096,
+    abortSignal,
   );
 }
 
@@ -211,7 +217,7 @@ export async function deepSolve(
   // Step 1: Plan
   sendEvent({ type: 'deep_solve', phase: 'planning', message: '问题较复杂，正在拆解为子目标...' });
 
-  const subGoals = await planSubGoals(question, context);
+  const subGoals = await planSubGoals(question, context, abortSignal);
   if (abortSignal?.aborted || isDisconnected()) return null;
 
   if (subGoals.length === 0) {
@@ -241,7 +247,7 @@ export async function deepSolve(
     });
 
     try {
-      const result = await solveSubGoal(question, sg, results, context, style);
+      const result = await solveSubGoal(question, sg, results, context, style, abortSignal);
       results.push({ title: sg.title, result });
     } catch (err: any) {
       results.push({ title: sg.title, result: `(求解失败: ${err.message || '未知错误'})` });
@@ -253,7 +259,7 @@ export async function deepSolve(
   // Step 3: Synthesize
   sendEvent({ type: 'deep_solve', phase: 'synthesizing', message: '正在综合各步骤结果...' });
 
-  const finalAnswer = await synthesizeAnswer(question, subGoals, results, context, style);
+  const finalAnswer = await synthesizeAnswer(question, subGoals, results, context, style, abortSignal);
 
   if (abortSignal?.aborted || isDisconnected()) return null;
 

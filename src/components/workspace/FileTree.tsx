@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 import { ChevronRight, ChevronDown, File, Folder, FolderOpen, Plus, Trash2, Pencil, X, Check } from 'lucide-react';
-import { cn } from '../lib/utils';
+import { cn } from '../../lib/utils';
 
 export interface FileNode {
   name: string;

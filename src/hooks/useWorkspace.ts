@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
-import { FileNode } from '../components/FileTree';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { FileNode } from '../components/workspace/FileTree';
 import { readSSEStream } from './useStreamFetch';
 import { apiFetch, authFetchInit } from '../lib/api';
 
@@ -27,6 +27,7 @@ export function useWorkspace(
   const abortRef = useRef<AbortController | null>(null);
   const starterCodeRef = useRef(starterCode);
   starterCodeRef.current = starterCode;
+  const fileTreeSignatureRef = useRef('');
 
   const baseUrl = `/api/workspace/${courseId}/${type}/${itemId}`;
 
@@ -41,31 +42,49 @@ export function useWorkspace(
     return null;
   }
 
-  const reloadTree = () => {
-    apiFetch(`${baseUrl}/tree`).then(setFileTree).catch(() => {});
-  };
+  const setFileTreeIfChanged = useCallback((tree: FileNode[]) => {
+    const signature = JSON.stringify(tree);
+    if (signature !== fileTreeSignatureRef.current) {
+      fileTreeSignatureRef.current = signature;
+      setFileTree(tree);
+    }
+  }, []);
+
+  const reloadTree = useCallback((selectInitialFile = false) => {
+    if (!itemId || !hasContent) return Promise.resolve();
+    return apiFetch<FileNode[]>(`${baseUrl}/tree`)
+      .then(data => {
+        setFileTreeIfChanged(data);
+        if (selectInitialFile && data.length > 0 && !activeFileRef.current) {
+          const first = findFirstFile(data);
+          if (first) setActiveFile(first);
+        }
+      });
+  }, [baseUrl, hasContent, itemId, setFileTreeIfChanged]);
 
   // Load file tree
   useEffect(() => {
     if (!itemId || !hasContent) return;
-    apiFetch(`${baseUrl}/tree`)
-      .then(data => {
-        setFileTree(data);
-        if (data.length > 0 && !activeFileRef.current) {
-          const first = findFirstFile(data);
-          if (first) setActiveFile(first);
-        }
-      })
+    reloadTree(true)
       .catch(() => {
         if (starterCode) {
           const tree = Object.keys(starterCode).map(f => ({
             name: f.split('/').pop() || f, path: f, type: 'file' as const,
           }));
-          setFileTree(tree);
+          setFileTreeIfChanged(tree);
           if (tree.length > 0 && !activeFileRef.current) setActiveFile(tree[0].path);
         }
       });
-  }, [itemId, hasContent, courseId]);
+  }, [itemId, hasContent, courseId, reloadTree, setFileTreeIfChanged, starterCode]);
+
+  // Keep the explorer in sync with files created by terminal commands or external tools.
+  useEffect(() => {
+    if (!itemId || !hasContent) return;
+    const interval = window.setInterval(() => {
+      if (document.visibilityState === 'visible') reloadTree().catch(() => {});
+    }, 2000);
+    return () => window.clearInterval(interval);
+  }, [itemId, hasContent, reloadTree]);
 
   // Load file content
   useEffect(() => {
@@ -80,6 +99,8 @@ export function useWorkspace(
   // Reset on item change + abort in-flight AI
   useEffect(() => {
     if (saveTimeoutRef.current) { clearTimeout(saveTimeoutRef.current); saveTimeoutRef.current = null; }
+    fileTreeSignatureRef.current = '';
+    setFileTree([]);
     setActiveFile('');
     setFileContent('');
     return () => { abortRef.current?.abort(); };
@@ -104,7 +125,7 @@ export function useWorkspace(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path, content: fileType === 'file' ? '' : undefined, fileType }),
-    }).then(reloadTree).catch(() => {});
+    }).then(() => reloadTree()).catch(() => {});
   };
 
   const handleRenameFile = (oldPath: string, newPath: string) => {
@@ -114,7 +135,7 @@ export function useWorkspace(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ oldPath, newPath }),
     }).then(() => {
-      reloadTree();
+      reloadTree().catch(() => {});
       if (activeFile === oldPath) setActiveFile(newPath);
     }).catch(() => {});
   };
@@ -123,7 +144,7 @@ export function useWorkspace(
     if (!itemId) return;
     apiFetch(`${baseUrl}/file/${path}`, { method: 'DELETE' })
       .then(() => {
-        reloadTree();
+        reloadTree().catch(() => {});
         if (activeFile === path) { setActiveFile(''); setFileContent(''); }
       }).catch(() => {});
   };
@@ -149,7 +170,7 @@ export function useWorkspace(
           setAiModifyResult(`修改失败：${msg}`);
         },
       });
-      reloadTree();
+      reloadTree().catch(() => {});
     } catch {
       setAiModifyResult('修改失败，请检查 API 设置。');
     }

@@ -139,6 +139,14 @@ CREATE TABLE IF NOT EXISTS review_items (
   created_at TEXT NOT NULL
 );
 
+-- Auth configuration (single-user password)
+CREATE TABLE IF NOT EXISTS auth_config (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  password_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Indexes for foreign key columns
 CREATE INDEX IF NOT EXISTS idx_topics_course_id ON topics(course_id);
 CREATE INDEX IF NOT EXISTS idx_messages_topic_id ON messages(topic_id);

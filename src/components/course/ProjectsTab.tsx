@@ -1,9 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense, lazy } from 'react';
 import { FolderGit2, CheckCircle2, ArrowLeft, ArrowRight, Sparkles, Loader2, Trophy, XCircle } from 'lucide-react';
-import { apiFetch } from '../lib/api';
-import { cn } from '../lib/utils';
+import { apiFetch } from '../../lib/api';
+import { cn } from '../../lib/utils';
 import { motion } from 'motion/react';
-import { ProjectWorkspace } from './ProjectWorkspace';
+
+const LazyProjectWorkspace = lazy(() =>
+  import('../workspace/ProjectWorkspace').then(m => ({ default: m.ProjectWorkspace }))
+);
 
 interface ProjectsTabProps {
   courseId: string;
@@ -16,6 +19,8 @@ export function ProjectsTab({ courseId, projects, onProjectsChange }: ProjectsTa
     try { const s = JSON.parse(sessionStorage.getItem('tutor-nav') || '{}'); return s.projectId || null; } catch { return null; }
   });
   const [activeProject, setActiveProject] = useState<any>(null);
+  const projectsRef = { current: projects };
+  projectsRef.current = projects;
   const [activeMilestone, setActiveMilestone] = useState<number | null>(null);
 
   // Persist activeProjectId to sessionStorage
@@ -40,7 +45,7 @@ export function ProjectsTab({ courseId, projects, onProjectsChange }: ProjectsTa
         .then(proj => {
           if (cancelled) return;
           setActiveProject(proj);
-          if (proj && (!proj.starter_code || Object.keys(proj.starter_code).length === 0)) {
+          if (proj && proj.status === 'in-progress' && (!proj.starter_code || Object.keys(proj.starter_code).length === 0)) {
             apiFetch(`/api/courses/${courseId}/generate-project/${activeProjectId}`, { method: 'POST' }).catch(() => {});
             let delay = 3000;
             const poll = async () => {
@@ -50,7 +55,7 @@ export function ProjectsTab({ courseId, projects, onProjectsChange }: ProjectsTa
                 if (cancelled) return;
                 if (updated && updated.starter_code && Object.keys(updated.starter_code).length > 0) {
                   setActiveProject(updated);
-                  onProjectsChange((projects || []).map((p: any) => p.id === activeProjectId ? updated : p));
+                  onProjectsChange((projectsRef.current || []).map((p: any) => p.id === activeProjectId ? updated : p));
                   return;
                 }
               } catch { /* retry */ }
@@ -82,6 +87,7 @@ export function ProjectsTab({ courseId, projects, onProjectsChange }: ProjectsTa
   // Poll projects list with exponential backoff
   useEffect(() => {
     const hasGenerating = projects.some((p: any) => {
+      if (p.status !== 'in-progress') return false;
       if (typeof p.starter_code === 'string' && p.starter_code.includes('"error":true')) return false;
       return !p.starter_code || (typeof p.starter_code === 'object' && Object.keys(p.starter_code).length === 0);
     });
@@ -93,6 +99,7 @@ export function ProjectsTab({ courseId, projects, onProjectsChange }: ProjectsTa
         const newProjects = await apiFetch(`/api/courses/${courseId}/projects`);
         onProjectsChange(newProjects);
         const stillGenerating = newProjects.some((p: any) => {
+          if (p.status !== 'in-progress') return false;
           if (typeof p.starter_code === 'string' && p.starter_code.includes('"error":true')) return false;
           return !p.starter_code || (typeof p.starter_code === 'object' && Object.keys(p.starter_code).length === 0);
         });
@@ -110,7 +117,11 @@ export function ProjectsTab({ courseId, projects, onProjectsChange }: ProjectsTa
   }, [projects, courseId]);
 
   const hasProjContent = activeProject?.starter_code && typeof activeProject.starter_code === 'object' && Object.keys(activeProject.starter_code).length > 0;
-  if (activeMilestone !== null && hasProjContent) return <ProjectWorkspace project={activeProject} onBack={() => setActiveMilestone(null)} courseId={courseId} />;
+  if (activeMilestone !== null && hasProjContent) return (
+    <Suspense fallback={<div className="flex h-full items-center justify-center"><div className="flex flex-col items-center gap-3"><div className="w-8 h-8 rounded-full bg-white/[0.06] animate-pulse" /><div className="text-white/30 text-sm font-mono">Loading...</div></div></div>}>
+      <LazyProjectWorkspace project={activeProject} onBack={() => setActiveMilestone(null)} courseId={courseId} />
+    </Suspense>
+  );
 
   if (activeProjectId !== null && hasProjContent) {
     const milestones = activeProject?.milestones || [];
@@ -232,13 +243,18 @@ export function ProjectsTab({ courseId, projects, onProjectsChange }: ProjectsTa
         {projects.map((proj, idx) => {
           const projHasError = typeof proj.starter_code === 'string' && proj.starter_code.includes('"error":true');
           const hasContent = !!(proj.starter_code && typeof proj.starter_code === 'object' && Object.keys(proj.starter_code).length > 0);
+          const isGenerating = !hasContent && !projHasError && proj.status === 'in-progress';
+          const isPending = !hasContent && !projHasError && proj.status !== 'in-progress';
           return (
           <div
             key={proj.id}
             onClick={() => {
               if (hasContent) setActiveProjectId(proj.id);
               else if (projHasError) {
-                onProjectsChange(projects.map((p: any) => p.id === proj.id ? { ...p, starter_code: null } : p));
+                onProjectsChange((projectsRef.current || []).map((p: any) => p.id === proj.id ? { ...p, starter_code: null } : p));
+                apiFetch(`/api/courses/${courseId}/generate-project/${proj.id}`, { method: 'POST' }).catch(() => {});
+              } else if (isPending) {
+                onProjectsChange((projectsRef.current || []).map((p: any) => p.id === proj.id ? { ...p, status: 'in-progress' } : p));
                 apiFetch(`/api/courses/${courseId}/generate-project/${proj.id}`, { method: 'POST' }).catch(() => {});
               }
             }}
@@ -249,6 +265,8 @@ export function ProjectsTab({ courseId, projects, onProjectsChange }: ProjectsTa
                 ? "hover:border-purple-500/30 hover:bg-purple-500/[0.02] cursor-pointer group"
                 : projHasError
                 ? "opacity-80 cursor-pointer hover:border-red-500/30 border-red-500/20"
+                : isPending
+                ? "opacity-80 cursor-pointer hover:border-purple-500/20 border-dashed border-white/10"
                 : "opacity-60 cursor-not-allowed border-dashed border-white/5"
             )}
           >
@@ -294,17 +312,15 @@ export function ProjectsTab({ courseId, projects, onProjectsChange }: ProjectsTa
                   <CheckCircle2 className="w-3.5 h-3.5" /> 已完成
                 </div>
               )}
-              {!hasContent && !projHasError && (
+              {isGenerating && (
                 <div className="mt-2 text-xs font-medium text-indigo-400 flex items-center gap-1 justify-end">
                   <Loader2 className="w-3 h-3 animate-spin" /> AI 生成中...
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      apiFetch(`/api/courses/${courseId}/projects/${proj.id}`, {
-                        method: 'PUT',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ status: 'pending' }),
-                      }).then(() => onProjectsChange((projects || []).map((p: any) => p.id === proj.id ? { ...p, status: 'pending' } : p))).catch(() => {});
+                      apiFetch(`/api/courses/${courseId}/cancel-project/${proj.id}`, { method: 'POST' })
+                        .then(() => onProjectsChange((projectsRef.current || []).map((p: any) => p.id === proj.id ? { ...p, status: 'pending', starter_code: {} } : p)))
+                        .catch(() => {});
                     }}
                     className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-red-400 hover:bg-red-500/10 transition-colors"
                   >
@@ -312,9 +328,45 @@ export function ProjectsTab({ courseId, projects, onProjectsChange }: ProjectsTa
                   </button>
                 </div>
               )}
+              {isPending && (
+                <div className="mt-2 text-xs font-medium text-white/40 flex items-center gap-1 justify-end">
+                  已取消
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onProjectsChange((projectsRef.current || []).map((p: any) => p.id === proj.id ? { ...p, status: 'in-progress' } : p));
+                      apiFetch(`/api/courses/${courseId}/generate-project/${proj.id}`, { method: 'POST' }).catch(() => {});
+                    }}
+                    className="px-1 py-0.5 rounded text-purple-400 hover:bg-purple-500/10 transition-colors"
+                  >
+                    生成
+                  </button>
+                </div>
+              )}
               {projHasError && (
                 <div className="mt-2 text-xs font-medium text-red-400 flex items-center gap-1 justify-end">
-                  生成失败，点击重试
+                  生成失败
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onProjectsChange((projectsRef.current || []).map((p: any) => p.id === proj.id ? { ...p, starter_code: null } : p));
+                      apiFetch(`/api/courses/${courseId}/generate-project/${proj.id}`, { method: 'POST' }).catch(() => {});
+                    }}
+                    className="px-1 py-0.5 rounded hover:bg-red-500/10 transition-colors"
+                  >
+                    重试
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      apiFetch(`/api/courses/${courseId}/projects/${proj.id}`, { method: 'DELETE' }).then(() => {
+                        onProjectsChange((projectsRef.current || []).filter((p: any) => p.id !== proj.id));
+                      }).catch(() => {});
+                    }}
+                    className="px-1 py-0.5 rounded hover:bg-red-500/10 transition-colors"
+                  >
+                    删除
+                  </button>
                 </div>
               )}
             </div>

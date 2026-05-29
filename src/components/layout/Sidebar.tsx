@@ -1,6 +1,6 @@
 import { MessageSquare, BookOpen, FileText, Code, FolderGit2, Settings, Sparkles, ArrowLeft, GraduationCap, Menu, X } from 'lucide-react';
-import { ViewMode } from '../types';
-import { cn } from '../lib/utils';
+import { ViewMode } from '../../types';
+import { cn } from '../../lib/utils';
 
 interface SidebarProps {
   currentView: ViewMode;

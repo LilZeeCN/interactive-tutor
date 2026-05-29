@@ -4,17 +4,17 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { sanitizePlugin } from '../lib/sanitize';
+import { sanitizePlugin } from '../../lib/sanitize';
 import { FileTree } from './FileTree';
-import { EnvironmentStatus } from './EnvironmentStatus';
-import { markdownComponents } from '../utils/codeRenderer.tsx';
+import { EnvironmentStatus } from '../settings/EnvironmentStatus';
+import { markdownComponents } from '../../utils/codeRenderer.tsx';
 import { motion } from 'motion/react';
 import MonacoEditor from '@monaco-editor/react';
-import { useWorkspace } from '../hooks/useWorkspace';
-import { useTerminal } from '../hooks/useTerminal';
-import { fetchSSEWithRetry } from '../hooks/useStreamFetch';
-import { getMonacoLang } from '../lib/monaco';
-import { ResizablePanel } from './ResizablePanel';
+import { useWorkspace } from '../../hooks/useWorkspace';
+import { useTerminal } from '../../hooks/useTerminal';
+import { fetchSSEWithRetry } from '../../hooks/useStreamFetch';
+import { getMonacoLang } from '../../lib/monaco';
+import { ResizablePanel } from '../layout/ResizablePanel';
 
 export function ProjectWorkspace({ project, onBack, courseId }: { project: any; onBack: () => void; courseId: string }) {
   const {

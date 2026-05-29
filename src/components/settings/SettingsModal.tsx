@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Settings, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
-import { apiFetch } from '../lib/api';
+import { apiFetch } from '../../lib/api';
 
 const PROVIDERS = [
   { value: 'auto', label: '自动检测' },
@@ -128,10 +128,12 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
     try {
       // Save first if there's a new key or provider change
       if (apiKey || apiProvider !== 'auto') {
+        const body: Record<string, string> = { api_url: apiUrl, model, api_provider: apiProvider };
+        if (apiKey) body.api_key = apiKey;
         await apiFetch('/api/settings', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ api_key: apiKey, api_url: apiUrl, model, api_provider: apiProvider }),
+          body: JSON.stringify(body),
         });
       }
 

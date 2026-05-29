@@ -1,9 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense, lazy } from 'react';
 import { Code, CheckCircle2, Clock, Sparkles, Loader2, XCircle } from 'lucide-react';
-import { apiFetch } from '../lib/api';
-import { cn } from '../lib/utils';
+import { apiFetch } from '../../lib/api';
+import { cn } from '../../lib/utils';
 import { motion } from 'motion/react';
-import { LabWorkspace } from './LabWorkspace';
+
+const LazyLabWorkspace = lazy(() =>
+  import('../workspace/LabWorkspace').then(m => ({ default: m.LabWorkspace }))
+);
 
 interface LabsTabProps {
   courseId: string;
@@ -17,6 +20,8 @@ export function LabsTab({ courseId, labs, onLabsChange }: LabsTabProps) {
   });
   const [activeLab, setActiveLab] = useState<any>(null);
   const [isInstructionsOpen, setIsInstructionsOpen] = useState(true);
+  const labsRef = { current: labs };
+  labsRef.current = labs;
 
   // Persist activeLabId to sessionStorage
   useEffect(() => {
@@ -40,7 +45,7 @@ export function LabsTab({ courseId, labs, onLabsChange }: LabsTabProps) {
         .then(lab => {
           if (cancelled) return;
           setActiveLab(lab);
-          if (lab && !lab.instructions) {
+          if (lab && !lab.instructions && lab.status === 'in-progress') {
             apiFetch(`/api/courses/${courseId}/generate-lab/${activeLabId}`, { method: 'POST' }).catch(() => {});
             let delay = 3000;
             const poll = async () => {
@@ -50,7 +55,7 @@ export function LabsTab({ courseId, labs, onLabsChange }: LabsTabProps) {
                 if (cancelled) return;
                 if (updated && updated.instructions) {
                   setActiveLab(updated);
-                  onLabsChange((labs || []).map((l: any) => l.id === activeLabId ? updated : l));
+                  onLabsChange((labsRef.current || []).map((l: any) => l.id === activeLabId ? updated : l));
                   return;
                 }
               } catch { /* retry */ }
@@ -81,7 +86,7 @@ export function LabsTab({ courseId, labs, onLabsChange }: LabsTabProps) {
 
   // Poll labs list to detect when generating items complete (with exponential backoff)
   useEffect(() => {
-    const hasGenerating = labs.some((l: any) => !l.instructions || (typeof l.instructions === 'string' && l.instructions.includes('"error":true')));
+    const hasGenerating = labs.some((l: any) => l.status === 'in-progress' && !l.instructions && !(typeof l.instructions === 'string' && l.instructions.includes('"error":true')));
     if (!hasGenerating) return;
     let attempts = 0;
     const poll = async () => {
@@ -89,7 +94,7 @@ export function LabsTab({ courseId, labs, onLabsChange }: LabsTabProps) {
       try {
         const newLabs = await apiFetch(`/api/courses/${courseId}/labs`);
         onLabsChange(newLabs);
-        const stillGenerating = newLabs.some((l: any) => !l.instructions || (typeof l.instructions === 'string' && l.instructions.includes('"error":true')));
+        const stillGenerating = newLabs.some((l: any) => l.status === 'in-progress' && !l.instructions && !(typeof l.instructions === 'string' && l.instructions.includes('"error":true')));
         if (stillGenerating && attempts < 60) {
           const delay = Math.min(3000 * Math.pow(1.3, attempts - 1), 15000);
           setTimeout(poll, delay);
@@ -104,7 +109,11 @@ export function LabsTab({ courseId, labs, onLabsChange }: LabsTabProps) {
   }, [labs, courseId]);
 
   if (activeLabId && activeLab?.instructions) {
-    return <LabWorkspace lab={activeLab} onBack={() => setActiveLabId(null)} isInstructionsOpen={isInstructionsOpen} onToggleInstructions={() => setIsInstructionsOpen(!isInstructionsOpen)} courseId={courseId} />;
+    return (
+      <Suspense fallback={<div className="flex h-full items-center justify-center"><div className="flex flex-col items-center gap-3"><div className="w-8 h-8 rounded-full bg-white/[0.06] animate-pulse" /><div className="text-white/30 text-sm font-mono">Loading...</div></div></div>}>
+        <LazyLabWorkspace lab={activeLab} onBack={() => setActiveLabId(null)} isInstructionsOpen={isInstructionsOpen} onToggleInstructions={() => setIsInstructionsOpen(!isInstructionsOpen)} courseId={courseId} />
+      </Suspense>
+    );
   }
 
   return (
@@ -139,13 +148,18 @@ export function LabsTab({ courseId, labs, onLabsChange }: LabsTabProps) {
             {labs.map((lab, idx) => {
               const hasContent = !!lab.instructions && !(typeof lab.instructions === 'string' && lab.instructions.includes('"error":true'));
               const hasError = !!lab.instructions && typeof lab.instructions === 'string' && lab.instructions.includes('"error":true');
+              const isGenerating = !hasContent && !hasError && lab.status === 'in-progress';
+              const isPending = !hasContent && !hasError && lab.status !== 'in-progress';
               return (
               <div
                 key={lab.id}
                 onClick={() => {
                   if (hasContent) setActiveLabId(lab.id);
                   else if (hasError) {
-                    onLabsChange(labs.map((l: any) => l.id === lab.id ? { ...l, instructions: null } : l));
+                    onLabsChange((labsRef.current || []).map((l: any) => l.id === lab.id ? { ...l, instructions: null } : l));
+                    apiFetch(`/api/courses/${courseId}/generate-lab/${lab.id}`, { method: 'POST' }).catch(() => {});
+                  } else if (isPending) {
+                    onLabsChange((labsRef.current || []).map((l: any) => l.id === lab.id ? { ...l, status: 'in-progress' } : l));
                     apiFetch(`/api/courses/${courseId}/generate-lab/${lab.id}`, { method: 'POST' }).catch(() => {});
                   }
                 }}
@@ -156,6 +170,8 @@ export function LabsTab({ courseId, labs, onLabsChange }: LabsTabProps) {
                     ? "hover:border-amber-500/30 hover:bg-amber-500/[0.02] cursor-pointer group"
                     : hasError
                     ? "opacity-80 cursor-pointer hover:border-red-500/30 border-red-500/20"
+                    : isPending
+                    ? "opacity-80 cursor-pointer hover:border-amber-500/20 border-dashed border-white/10"
                     : "opacity-60 cursor-not-allowed border-dashed border-white/5"
                 )}
               >
@@ -174,17 +190,15 @@ export function LabsTab({ courseId, labs, onLabsChange }: LabsTabProps) {
                   </h3>
                   <div className="flex items-center gap-4 text-xs text-white/40">
                     <span className="flex items-center gap-1"><Clock className="w-3.5 h-3.5" /> {lab.time || '2小时'}</span>
-                    {lab.status === 'in-progress' && (
+                    {isGenerating && (
                       <span className="flex items-center gap-1.5 text-indigo-400">
                         <Loader2 className="w-3 h-3 animate-spin" /> AI 生成中...
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
-                            apiFetch(`/api/courses/${courseId}/labs/${lab.id}`, {
-                              method: 'PUT',
-                              headers: { 'Content-Type': 'application/json' },
-                              body: JSON.stringify({ status: 'pending' }),
-                            }).then(() => onLabsChange(labs.map((l: any) => l.id === lab.id ? { ...l, status: 'pending' } : l))).catch(() => {});
+                            apiFetch(`/api/courses/${courseId}/cancel-lab/${lab.id}`, { method: 'POST' })
+                              .then(() => onLabsChange((labsRef.current || []).map((l: any) => l.id === lab.id ? { ...l, status: 'pending', instructions: '', starter_code: {}, test_cases: [] } : l)))
+                              .catch(() => {});
                           }}
                           className="flex items-center gap-0.5 px-1.5 py-0.5 rounded text-red-400 hover:bg-red-500/10 transition-colors"
                         >
@@ -192,7 +206,47 @@ export function LabsTab({ courseId, labs, onLabsChange }: LabsTabProps) {
                         </button>
                       </span>
                     )}
-                    {hasError && <span className="flex items-center gap-1 text-red-400">生成失败</span>}
+                    {isPending && (
+                      <span className="flex items-center gap-1.5 text-white/40">
+                        已取消
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onLabsChange((labsRef.current || []).map((l: any) => l.id === lab.id ? { ...l, status: 'in-progress' } : l));
+                            apiFetch(`/api/courses/${courseId}/generate-lab/${lab.id}`, { method: 'POST' }).catch(() => {});
+                          }}
+                          className="px-1 py-0.5 text-xs rounded text-amber-400 hover:bg-amber-500/10 transition-colors"
+                        >
+                          生成
+                        </button>
+                      </span>
+                    )}
+                    {hasError && (
+                      <span className="flex items-center gap-1 text-red-400">
+                        生成失败
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onLabsChange((labsRef.current || []).map((l: any) => l.id === lab.id ? { ...l, instructions: null } : l));
+                            apiFetch(`/api/courses/${courseId}/generate-lab/${lab.id}`, { method: 'POST' }).catch(() => {});
+                          }}
+                          className="px-1 py-0.5 text-xs rounded hover:bg-red-500/10 transition-colors"
+                        >
+                          重试
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            apiFetch(`/api/courses/${courseId}/labs/${lab.id}`, { method: 'DELETE' }).then(() => {
+                              onLabsChange((labsRef.current || []).filter((l: any) => l.id !== lab.id));
+                            }).catch(() => {});
+                          }}
+                          className="px-1 py-0.5 text-xs rounded hover:bg-red-500/10 transition-colors"
+                        >
+                          删除
+                        </button>
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>

@@ -1,33 +1,31 @@
 import { Request, Response, NextFunction } from 'express';
-import { randomBytes } from 'crypto';
+import { verifyToken, isAuthConfigured } from '../services/auth.js';
 
 /**
- * Simple bearer-token auth for a single-user local app.
+ * JWT-based auth middleware for single-user local app.
  *
  * Flow:
- * 1. Server generates a random session token on startup.
- * 2. Client fetches GET /api/bootstrap (unauthenticated) to obtain the token.
- * 3. Client sends Authorization: Bearer <token> on all subsequent requests.
- * 4. This middleware rejects any request without a valid token.
- *
- * This prevents casual network scanning from accessing the API.
- * For a local tool bound to 127.0.0.1 this is sufficient.
+ * 1. Client calls GET /api/auth/status (public) to check if password is set.
+ * 2. Client calls POST /api/auth/setup or /api/auth/login (public) to get a JWT.
+ * 3. Client sends Authorization: Bearer <jwt> on all subsequent API requests.
+ * 4. This middleware validates the JWT on every protected request.
  */
 
-const SESSION_TOKEN = randomBytes(32).toString('hex');
-
-/** Paths that do NOT require authentication */
-const PUBLIC_PATHS = new Set([
-  '/api/bootstrap',     // token distribution
-]);
+/** Path prefixes that do NOT require authentication */
+const PUBLIC_PREFIXES = [
+  '/api/auth/',
+  '/api/bootstrap',
+];
 
 export function getSessionToken(): string {
-  return SESSION_TOKEN;
+  // Kept for backward compatibility (WebSocket terminal auth)
+  // Returns empty string — callers should use verifyToken() instead
+  return '';
 }
 
 export function authMiddleware(req: Request, res: Response, next: NextFunction): void {
-  // Allow public paths
-  if (PUBLIC_PATHS.has(req.path)) {
+  // Allow public paths (check prefix matching for /api/auth/*)
+  if (PUBLIC_PREFIXES.some(p => req.path.startsWith(p)) || req.path === '/api/bootstrap') {
     next();
     return;
   }
@@ -38,15 +36,21 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     return;
   }
 
+  // If auth is not configured yet, allow all API requests (setup phase)
+  if (!isAuthConfigured()) {
+    next();
+    return;
+  }
+
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'Authentication required' });
+    res.status(401).json({ error: '请先登录' });
     return;
   }
 
   const token = authHeader.slice(7);
-  if (token !== SESSION_TOKEN) {
-    res.status(403).json({ error: 'Invalid token' });
+  if (!verifyToken(token)) {
+    res.status(401).json({ error: '登录已过期，请重新登录' });
     return;
   }
 

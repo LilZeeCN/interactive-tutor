@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect } from 'react';
 import { BookOpen, CheckCircle2, Circle, Clock, ExternalLink, Sparkles, Loader2 } from 'lucide-react';
-import { apiFetch } from '../lib/api';
-import { SyllabusRow } from '../types';
-import { cn } from '../lib/utils';
+import { apiFetch } from '../../lib/api';
+import { SyllabusRow } from '../../types';
+import { cn } from '../../lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
-import { useToast } from './Toast';
+import { useToast } from '../ui/Toast';
 
 interface SyllabusTabProps {
   courseId: string;
@@ -197,10 +197,8 @@ export function SyllabusTab({ courseId, syllabus, onNavigate, onSyllabusChange }
                     });
                     if (data.success) {
                       toast(`${assignment.type === 'lab' ? '实验' : '项目'}「${assignment.title}」已创建，AI 正在生成内容`);
-                      if (onSyllabusChange) {
-                        const updated = await apiFetch(`/api/courses/${courseId}/syllabus`);
-                        onSyllabusChange(updated);
-                      }
+                      // Navigate to labs/projects tab — don't pass itemId so user sees the list
+                      onNavigate?.(assignment.type === 'lab' ? 'labs' : 'projects');
                     } else {
                       toast('创建失败，请稍后重试', 'error');
                     }

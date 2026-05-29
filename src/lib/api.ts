@@ -12,6 +12,9 @@ async function bootstrap(): Promise<string> {
   const res = await fetch('/api/bootstrap');
   if (!res.ok) throw new Error('Failed to bootstrap auth');
   const data = await res.json();
+  // If auth is not configured or no token in response, return empty
+  // (the app will show LoginPage and handle auth flow)
+  if (!data.token) return '';
   sessionToken = data.token as string;
   return sessionToken;
 }
@@ -35,6 +38,12 @@ export async function getAuthToken(): Promise<string> {
 export function invalidateAuthToken(): void {
   sessionToken = null;
   bootstrapPromise = null;
+}
+
+/** Set the auth token directly (used after login/setup) */
+export function setAuthToken(token: string): void {
+  sessionToken = token;
+  bootstrapPromise = Promise.resolve(token);
 }
 
 /**

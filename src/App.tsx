@@ -1,86 +1,99 @@
-import { useState, useEffect, useRef } from 'react';
-import { Sidebar } from './components/Sidebar';
-import { ChatView } from './components/ChatView';
+import { useState, useEffect, Suspense, lazy } from 'react';
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useParams, useLocation } from 'react-router-dom';
+import { Sidebar } from './components/layout/Sidebar';
 import { DocumentView } from './components/DocumentView';
-import { LectureView } from './components/LectureView';
-import { CourseSelection } from './components/CourseSelection';
-import { SettingsModal } from './components/SettingsModal';
-import { ErrorBoundary } from './components/ErrorBoundary';
-import { useToast } from './components/Toast';
+import { CourseSelection } from './components/course/CourseSelection';
+import { SettingsModal } from './components/settings/SettingsModal';
+import { ErrorBoundary } from './components/layout/ErrorBoundary';
+import { useToast } from './components/ui/Toast';
 import { ViewMode, Course } from './types';
-import { apiFetch } from './lib/api';
+import { apiFetch, setAuthToken } from './lib/api';
+import { LoginPage } from './components/ui/LoginPage';
+import { LoadingScreen } from './components/layout/LoadingScreen';
+
+// Lazy-loaded heavy components (React.lazy with named-export adapters)
+const LazyLectureView = lazy(() =>
+  import('./components/lecture/LectureView').then(m => ({ default: m.LectureView }))
+);
+const LazyChatView = lazy(() =>
+  import('./components/chat/ChatView').then(m => ({ default: m.ChatView }))
+);
+
+// Shared Suspense fallback
+function RouteFallback() {
+  return (
+    <div className="flex h-full items-center justify-center bg-bg-base">
+      <div className="flex flex-col items-center gap-3">
+        <div className="w-8 h-8 rounded-full bg-white/[0.06] animate-pulse" />
+        <div className="text-white/30 text-sm font-mono">Loading...</div>
+      </div>
+    </div>
+  );
+}
 
 const STORAGE_KEY = 'tutor-nav';
 
-function loadNavState() {
-  try {
-    const raw = sessionStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch {}
-  return null;
-}
-
-function saveNavState(state: { courseId?: string; view?: ViewMode; labId?: string; projectId?: string }) {
-  try {
-    const prev = loadNavState() || {};
-    sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ ...prev, ...state }));
-  } catch {}
-}
-
 export default function App() {
-  const { toast } = useToast();
-  const [courses, setCourses] = useState<Course[]>([]);
-  const [currentCourse, setCurrentCourse] = useState<Course | null>(null);
-  const [currentView, setCurrentView] = useState<ViewMode>('lectures');
-  const [showSettings, setShowSettings] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [pendingLabId, setPendingLabId] = useState<string | null>(null);
-  const [pendingProjectId, setPendingProjectId] = useState<string | null>(null);
-  const restoredRef = useRef(false);
+  return (
+    <BrowserRouter>
+      <AppContent />
+    </BrowserRouter>
+  );
+}
 
-  // Load courses from backend on mount
+/** Top-level: auth gate + course fetching + routing */
+function AppContent() {
+  const { toast } = useToast();
+  const navigate = useNavigate();
+  const [courses, setCourses] = useState<Course[]>([]);
+  const [showSettings, setShowSettings] = useState(false);
+  const [authState, setAuthState] = useState<'loading' | 'login' | 'authenticated'>('loading');
+  const [authConfigured, setAuthConfigured] = useState(false);
+  const [loadingCourses, setLoadingCourses] = useState(true);
+
+  // Check auth status on mount
   useEffect(() => {
+    fetch('/api/auth/status')
+      .then(res => res.json())
+      .then(data => {
+        setAuthConfigured(data.configured);
+        setAuthState('login');
+        setLoadingCourses(false);
+      })
+      .catch(() => {
+        setAuthState('login');
+        setLoadingCourses(false);
+      });
+  }, []);
+
+  // Load courses after authentication
+  useEffect(() => {
+    if (authState !== 'authenticated') return;
     apiFetch('/api/courses')
       .then(data => {
         setCourses(data);
-
-        // Restore navigation state from sessionStorage
-        const saved = loadNavState();
-        if (saved?.courseId && !restoredRef.current) {
-          restoredRef.current = true;
-          const course = data.find((c: Course) => c.id === saved.courseId);
-          if (course) {
-            setCurrentCourse(course);
-            if (saved.view) setCurrentView(saved.view);
-            if (saved.labId || saved.projectId) {
-              if (saved.labId) setPendingLabId(saved.labId);
-              if (saved.projectId) setPendingProjectId(saved.projectId);
-            }
-          }
-        }
-
-        setLoading(false);
+        setLoadingCourses(false);
       })
-      .catch(() => setLoading(false));
-  }, []);
+      .catch(() => setLoadingCourses(false));
+  }, [authState]);
 
-  // Persist courseId and view on change
-  useEffect(() => {
-    if (currentCourse) {
-      saveNavState({ courseId: currentCourse.id, view: currentView });
-    }
-  }, [currentCourse, currentView]);
+  const handleAuth = (token: string) => {
+    setAuthToken(token);
+    setAuthState('authenticated');
+  };
 
-  const handleCreateCourse = async (newCourseData: Omit<Course, 'id' | 'createdAt'>): Promise<string | null> => {
+  const handleCreateCourse = async (
+    newCourseData: Omit<Course, 'id' | 'createdAt'>
+  ): Promise<string | null> => {
     try {
-      const newCourse = await apiFetch('/api/courses', {
+      const newCourse = await apiFetch<Course>('/api/courses', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newCourseData),
       });
       setCourses(prev => [newCourse, ...prev]);
       toast('课程创建成功，AI 正在生成大纲');
+      // Don't navigate — stay on course list until syllabus is ready
       return newCourse.id;
     } catch {
       toast('课程创建失败，请检查网络连接', 'error');
@@ -88,82 +101,139 @@ export default function App() {
     }
   };
 
+  const handleCourseReady = (courseId: string) => {
+    try {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ courseId }));
+    } catch { /* ignore */ }
+    navigate(`/courses/${courseId}/lectures`);
+  };
+
   const handleDeleteCourse = async (id: string) => {
     try {
       await apiFetch(`/api/courses/${id}`, { method: 'DELETE' });
       setCourses(prev => prev.filter(c => c.id !== id));
-      if (currentCourse?.id === id) {
-        setCurrentCourse(null);
-        sessionStorage.removeItem(STORAGE_KEY);
-      }
       toast('课程已删除');
     } catch {
       toast('删除失败，请重试', 'error');
     }
   };
 
-  const handleBackToCourses = () => {
-    setCurrentCourse(null);
-    sessionStorage.removeItem(STORAGE_KEY);
+  const handleSelectCourse = (course: Course) => {
+    try {
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ courseId: course.id }));
+    } catch { /* ignore */ }
+    navigate(`/courses/${course.id}/lectures`);
   };
 
-  if (loading) {
-    return (
-      <div className="flex h-screen w-full bg-bg-base text-text-primary items-center justify-center">
-        <div className="flex flex-col items-center gap-3">
-          <div className="w-8 h-8 rounded-full bg-white/[0.06] animate-pulse" />
-          <div className="text-white/30 text-sm font-mono">Loading...</div>
-        </div>
-      </div>
-    );
+  // Auth loading state
+  if (authState === 'loading' || (authState === 'authenticated' && loadingCourses)) {
+    return <LoadingScreen />;
   }
 
-  if (!currentCourse) {
-    return (
-      <>
-        <CourseSelection
-          courses={courses}
-          onSelectCourse={(course) => {
-            setCurrentCourse(course);
-            setCurrentView('lectures');
-          }}
-          onCreateCourse={handleCreateCourse}
-          onDeleteCourse={handleDeleteCourse}
-          onOpenSettings={() => setShowSettings(true)}
+  // Login gate
+  if (authState === 'login') {
+    return <LoginPage configured={authConfigured} onAuth={handleAuth} />;
+  }
+
+  return (
+    <>
+      <Routes>
+        <Route
+          path="/courses"
+          element={
+            <CourseSelection
+              courses={courses}
+              onSelectCourse={handleSelectCourse}
+              onCreateCourse={handleCreateCourse}
+              onDeleteCourse={handleDeleteCourse}
+              onOpenSettings={() => setShowSettings(true)}
+              onCourseReady={handleCourseReady}
+            />
+          }
         />
-        <SettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} />
-      </>
-    );
+        <Route
+          path="/courses/:courseId/*"
+          element={
+            <CourseLayout
+              courses={courses}
+              onDeleteCourse={handleDeleteCourse}
+              onOpenSettings={() => setShowSettings(true)}
+            />
+          }
+        />
+        <Route path="*" element={<Navigate to="/courses" replace />} />
+      </Routes>
+      <SettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} />
+    </>
+  );
+}
+
+/** Layout wrapper for course detail views — sidebar + nested routes */
+function CourseLayout({
+  courses,
+  onDeleteCourse: _onDeleteCourse,
+  onOpenSettings,
+}: {
+  courses: Course[];
+  onDeleteCourse: (id: string) => void;
+  onOpenSettings: () => void;
+}) {
+  const { courseId } = useParams<{ courseId: string }>();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const course = courses.find(c => c.id === courseId);
+
+  // Derive active tab from URL path
+  const currentView: ViewMode = (() => {
+    const path = location.pathname;
+    if (path.endsWith('/chat')) return 'chat';
+    if (path.endsWith('/syllabus')) return 'syllabus';
+    if (path.endsWith('/notes')) return 'notes';
+    if (path.endsWith('/labs')) return 'labs';
+    if (path.endsWith('/projects')) return 'projects';
+    return 'lectures';
+  })();
+
+  // Persist courseId to sessionStorage so returning users land back here
+  useEffect(() => {
+    if (courseId) {
+      try {
+        sessionStorage.setItem(STORAGE_KEY, JSON.stringify({ courseId }));
+      } catch { /* ignore */ }
+    }
+  }, [courseId]);
+
+  if (!course) {
+    return <Navigate to="/courses" replace />;
   }
 
-  const handleNavigate = (type: ViewMode, itemId?: string) => {
-    setCurrentView(type);
-    // Clear both pending IDs on any navigation, set the relevant one
-    setPendingLabId(null);
-    setPendingProjectId(null);
-    if (itemId) {
-      if (type === 'labs') setPendingLabId(itemId);
-      else if (type === 'projects') setPendingProjectId(itemId);
-    }
+  const handleViewChange = (view: ViewMode) => {
+    setSidebarOpen(false);
+    navigate(`/courses/${courseId}/${view}`);
   };
 
-  const renderContent = () => {
-    switch (currentView) {
-      case 'chat':
-        return <ChatView key="chat" courseId={currentCourse.id} />;
-      case 'lectures':
-        return <LectureView key="lectures" courseId={currentCourse.id} />;
-      case 'syllabus':
-        return <DocumentView key="syllabus" title="课程大纲 (Syllabus)" type="syllabus" courseId={currentCourse.id} onNavigate={handleNavigate} />;
-      case 'notes':
-        return <DocumentView key="notes" title="课后笔记 (Notes)" type="notes" courseId={currentCourse.id} />;
-      case 'labs':
-        return <DocumentView key="labs" title="随堂练习 (Labs)" type="labs" courseId={currentCourse.id} pendingNavId={pendingLabId} />;
-      case 'projects':
-        return <DocumentView key="projects" title="综合项目 (Projects)" type="projects" courseId={currentCourse.id} pendingNavId={pendingProjectId} />;
-      default:
-        return <ChatView key="chat-default" courseId={currentCourse.id} />;
-    }
+  const handleBackToCourses = () => {
+    sessionStorage.removeItem(STORAGE_KEY);
+    navigate('/courses');
+  };
+
+  /** Cross-view navigation (e.g. syllabus → labs) — also stashes item id in sessionStorage */
+  const handleNavigate = (type: ViewMode, itemId?: string) => {
+    try {
+      const s = JSON.parse(sessionStorage.getItem(STORAGE_KEY) || '{}');
+      if (itemId) {
+        if (type === 'labs') s.labId = itemId;
+        else if (type === 'projects') s.projectId = itemId;
+      } else {
+        // Clear any previously stashed item id so tab shows list, not auto-opens a specific item
+        delete s.labId;
+        delete s.projectId;
+      }
+      sessionStorage.setItem(STORAGE_KEY, JSON.stringify(s));
+    } catch { /* ignore */ }
+    navigate(`/courses/${courseId}/${type}`);
   };
 
   return (
@@ -171,20 +241,50 @@ export default function App() {
       <ErrorBoundary>
         <Sidebar
           currentView={currentView}
-          onViewChange={(v) => { setCurrentView(v); setSidebarOpen(false); }}
+          onViewChange={handleViewChange}
           onBackToCourses={handleBackToCourses}
-          courseTitle={currentCourse.title}
-          onOpenSettings={() => setShowSettings(true)}
+          courseTitle={course.title}
+          onOpenSettings={onOpenSettings}
           open={sidebarOpen}
           onToggle={() => setSidebarOpen(prev => !prev)}
         />
       </ErrorBoundary>
       <main className="flex-1 relative z-10 flex flex-col min-w-0 overflow-hidden">
         <ErrorBoundary>
-          {renderContent()}
+          <Suspense fallback={<RouteFallback />}>
+            <Routes>
+              {/* /courses/:courseId → redirect to lectures */}
+              <Route index element={<Navigate to="lectures" replace />} />
+              <Route path="lectures" element={<LazyLectureView courseId={courseId!} />} />
+              <Route path="chat" element={<LazyChatView courseId={courseId!} />} />
+              <Route
+                path="syllabus"
+                element={
+                  <DocumentView
+                    key="syllabus"
+                    title="课程大纲 (Syllabus)"
+                    type="syllabus"
+                    courseId={courseId!}
+                    onNavigate={handleNavigate}
+                  />
+                }
+              />
+              <Route
+                path="notes"
+                element={<DocumentView key="notes" title="课后笔记 (Notes)" type="notes" courseId={courseId!} />}
+              />
+              <Route
+                path="labs"
+                element={<DocumentView key="labs" title="随堂练习 (Labs)" type="labs" courseId={courseId!} />}
+              />
+              <Route
+                path="projects"
+                element={<DocumentView key="projects" title="综合项目 (Projects)" type="projects" courseId={courseId!} />}
+              />
+            </Routes>
+          </Suspense>
         </ErrorBoundary>
       </main>
-      <SettingsModal isOpen={showSettings} onClose={() => setShowSettings(false)} />
     </div>
   );
 }

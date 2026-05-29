@@ -14,6 +14,7 @@ import { asyncHandler } from '../helpers/asyncHandler.js';
 import { escapeLIKE } from '../helpers/sqlUtils.js';
 import { estimateTokens, truncateTextToTokens } from '../services/tokens.js';
 import { dbGet, dbAll } from '../db-types.js';
+import { validateId } from '../middleware/validate.js';
 import {
   MODIFY_PER_FILE_TOKEN_CAP,
   MODIFY_MAX_TOTAL_FILE_TOKENS,
@@ -229,17 +230,19 @@ contentRouter.put('/:id/projects/:projectId', (req: Request, res: Response) => {
 
 // GET /api/courses/:id/generation-status
 contentRouter.get('/:id/generation-status', (req: Request, res: Response) => {
-  const course = dbGet('SELECT * FROM courses WHERE id = ?', req.params.id);
+  const course = dbGet<{ generation_error?: string } & Record<string, unknown>>('SELECT * FROM courses WHERE id = ?', req.params.id);
   if (!course) {
     res.status(404).json({ error: '课程不存在' });
     return;
   }
 
   const syllabus = dbGet<{ count: number }>('SELECT COUNT(*) as count FROM syllabus WHERE course_id = ?', req.params.id);
+  const lectures = dbGet<{ count: number }>('SELECT COUNT(*) as count FROM lectures WHERE course_id = ?', req.params.id);
 
-  // Course is "done" once syllabus is generated; labs/projects/notes are created on demand
+  // Course is ready when both syllabus and lecture outline exist
   res.json({
-    done: syllabus.count > 0,
+    done: syllabus.count > 0 && lectures.count > 0,
+    error: course.generation_error || null,
   });
 });
 
@@ -254,9 +257,21 @@ contentRouter.post('/:id/regenerate', asyncHandler(async (req: Request, res: Res
 
   res.json({ success: true, message: '内容重新生成已启动' });
 
+  // Clear previous error
+  try { db.prepare('UPDATE courses SET generation_error = NULL WHERE id = ?').run(course.id); } catch { /* ignore */ }
+  try {
+    db.prepare('DELETE FROM lecture_progress WHERE course_id = ?').run(course.id);
+    db.prepare('DELETE FROM review_items WHERE course_id = ?').run(course.id);
+    db.prepare('DELETE FROM lectures WHERE course_id = ?').run(course.id);
+  } catch (err) {
+    console.error('Failed to clear old lecture outline for regeneration', course.id, err);
+  }
+
   // Fire and forget
-  generateCourseOutline(course).catch((err) => {
+  generateCourseOutline(course, { forceLectureOutline: true }).catch((err) => {
     console.error('Regeneration failed for course', course.id, err);
+    const msg = err instanceof Error ? err.message : String(err);
+    try { db.prepare('UPDATE courses SET generation_error = ? WHERE id = ?').run(msg, course.id); } catch { /* ignore */ }
   });
 }));
 
