@@ -1,5 +1,6 @@
-import { useState } from 'react';
-import { ArrowLeft, FolderGit2, TerminalSquare, Sparkles, Play, Bot, GitCommit, Lightbulb } from 'lucide-react';
+import { useState, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
+import { ArrowLeft, TerminalSquare, Sparkles, Play, Bot, GitCommit, Lightbulb, Maximize2, Minimize2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeKatex from 'rehype-katex';
@@ -15,6 +16,7 @@ import { useTerminal } from '../../hooks/useTerminal';
 import { fetchSSEWithRetry } from '../../hooks/useStreamFetch';
 import { getMonacoLang } from '../../lib/monaco';
 import { ResizablePanel } from '../layout/ResizablePanel';
+import { cn } from '../../lib/utils';
 
 export function ProjectWorkspace({ project, onBack, courseId }: { project: any; onBack: () => void; courseId: string }) {
   const {
@@ -36,12 +38,40 @@ export function ProjectWorkspace({ project, onBack, courseId }: { project: any; 
   const [aiHelpAnswer, setAiHelpAnswer] = useState('');
   const [helpLoading, setHelpLoading] = useState(false);
 
+  // Fullscreen immersive mode
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isExiting, setIsExiting] = useState(false);
+
+  const exitFullscreen = useCallback(() => {
+    setIsExiting(true);
+    setTimeout(() => {
+      setIsFullscreen(false);
+      setIsExiting(false);
+    }, 250);
+  }, []);
+
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        exitFullscreen();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isFullscreen, exitFullscreen]);
+
   const handleSubmitMilestone = async () => {
     setSubmitting(true);
     setMilestoneFeedback('');
     try {
       let fullContent = '';
-      await fetchSSEWithRetry('/api/review', { code: fileContent, labTitle: project?.title, instructions: '请审查此 Milestone 的完成情况，确认是否达到了验收标准。' }, {
+      const currentMilestone = milestones.find((m: any) => m.status === 'in-progress') || milestones[0];
+      const acceptanceHint = currentMilestone
+        ? `\n\n当前里程碑：${currentMilestone.title}\n验收标准：${currentMilestone.acceptance || currentMilestone.description || '（未指定）'}`
+        : '';
+      await fetchSSEWithRetry('/api/review', { code: fileContent, labTitle: project?.title, instructions: `请审查此 Milestone 的完成情况，确认是否达到了验收标准。${acceptanceHint}`, courseId, projectId: project?.id }, {
         onChunk: (d) => {
           if (d.type === 'chunk') { fullContent += d.content; setMilestoneFeedback(fullContent); }
         },
@@ -60,7 +90,7 @@ export function ProjectWorkspace({ project, onBack, courseId }: { project: any; 
     try {
       const code = activeFile ? `${activeFile}:\n${fileContent}` : '';
       let full = '';
-      await fetchSSEWithRetry('/api/review', { code, labTitle: project?.title, instructions: prompt }, {
+      await fetchSSEWithRetry('/api/review', { code, labTitle: project?.title, instructions: prompt, courseId, projectId: project?.id }, {
         onChunk: (d) => {
           if (d.type === 'chunk') { full += d.content; setAiHelpAnswer(full); }
         },
@@ -74,29 +104,48 @@ export function ProjectWorkspace({ project, onBack, courseId }: { project: any; 
 
   if (!project) return <div className="flex h-full items-center justify-center"><div className="w-7 h-7 rounded-full bg-white/[0.06] animate-pulse" /></div>;
 
-  return (
-    <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} transition={{ duration: 0.4 }} className="h-full flex flex-col min-h-0">
+  const workspaceContent = (
+    <motion.div initial={isFullscreen ? false : { opacity: 0, scale: 0.98 }} animate={isFullscreen ? false : { opacity: 1, scale: 1 }} transition={{ duration: 0.4 }} className="h-full flex flex-col min-h-0">
       {project?.starter_code && (<>
-      <div className="flex items-center justify-between shrink-0 mb-4 min-w-0 gap-4">
-        <div className="flex items-center gap-4 min-w-0">
-          <button onClick={onBack} className="p-2 hover:bg-white/10 rounded-lg text-white/60 hover:text-white transition-colors" aria-label="返回"><ArrowLeft className="w-5 h-5" /></button>
-          <div>
-            <div className="flex items-center gap-3 mb-1"><span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-widest bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">{project?.id?.toUpperCase() || 'PROJECT'}</span></div>
-            <h2 className="text-2xl font-medium tracking-tight text-white">{project?.title || '加载中...'}</h2>
+      {!isFullscreen && (
+        <>
+          <div className="flex items-center justify-between shrink-0 mb-4 min-w-0 gap-4">
+            <div className="flex items-center gap-4 min-w-0">
+              <button onClick={onBack} className="p-2 hover:bg-white/10 rounded-lg text-white/60 hover:text-white transition-colors" aria-label="返回"><ArrowLeft className="w-5 h-5" /></button>
+              <div>
+                <div className="flex items-center gap-3 mb-1"><span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-widest bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">{project?.id?.toUpperCase() || 'PROJECT'}</span></div>
+                <h2 className="text-2xl font-medium tracking-tight text-white">{project?.title || '加载中...'}</h2>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              <button
+                onClick={() => isFullscreen ? exitFullscreen() : setIsFullscreen(true)}
+                className={cn(
+                  "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-all duration-200 group",
+                  isFullscreen
+                    ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/20 hover:bg-emerald-500/20"
+                    : "text-white/60 hover:text-white bg-white/5 hover:bg-white/10 border-white/10 hover:border-white/20"
+                )}
+                title={isFullscreen ? "退出沉浸模式 (ESC)" : "沉浸式编程模式"}
+              >
+                {isFullscreen
+                  ? <Minimize2 className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                  : <Maximize2 className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                }
+                <span className="hidden lg:inline">{isFullscreen ? '退出沉浸' : '沉浸模式'}</span>
+              </button>
+              <button onClick={() => setAiModifyOpen(!aiModifyOpen)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-indigo-400 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 transition-colors whitespace-nowrap"><Sparkles className="w-4 h-4" />AI 修改</button>
+              <button onClick={() => writeToTerminal('npm test 2>&1 || echo "No test script configured"')} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 transition-colors whitespace-nowrap"><Play className="w-4 h-4" />运行测试用例</button>
+              <button onClick={handleSubmitMilestone} disabled={submitting} className="flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-medium text-black bg-white hover:bg-white/90 transition-colors shadow-[0_0_20px_rgba(255,255,255,0.1)] whitespace-nowrap disabled:opacity-50"><GitCommit className="w-4 h-4" />{submitting ? '提交中...' : '提交 Milestone'}</button>
+            </div>
           </div>
-        </div>
-        <div className="flex items-center gap-3 shrink-0">
-          <button onClick={() => setAiModifyOpen(!aiModifyOpen)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-indigo-400 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/20 transition-colors whitespace-nowrap"><Sparkles className="w-4 h-4" />AI 修改</button>
-          <button onClick={() => writeToTerminal('npm test 2>&1 || echo "No test script configured"')} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 transition-colors whitespace-nowrap"><Play className="w-4 h-4" />运行测试用例</button>
-          <button onClick={handleSubmitMilestone} disabled={submitting} className="flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-medium text-black bg-white hover:bg-white/90 transition-colors shadow-[0_0_20px_rgba(255,255,255,0.1)] whitespace-nowrap disabled:opacity-50"><GitCommit className="w-4 h-4" />{submitting ? '提交中...' : '提交 Milestone'}</button>
-        </div>
-      </div>
 
-      <EnvironmentStatus courseId={courseId} />
+          <EnvironmentStatus courseId={courseId} />
+        </>
+      )}
 
       <div className="flex-1 min-h-0 min-w-0 flex rounded-xl overflow-hidden border border-white/10 shadow-2xl bg-bg-surface">
         <div className="w-56 shrink-0 flex flex-col border-r border-white/10 bg-bg-base">
-          <div className="px-4 py-3 border-b border-white/10 flex items-center gap-2 text-sm font-medium text-white/80"><FolderGit2 className="w-4 h-4 text-white/50" />资源管理器</div>
           <FileTree
             tree={fileTree}
             activeFile={activeFile}
@@ -108,8 +157,48 @@ export function ProjectWorkspace({ project, onBack, courseId }: { project: any; 
         </div>
 
         <div className="flex-1 flex flex-col min-w-0 border-r border-white/10">
-          <div className="flex items-center px-4 py-3 bg-bg-base border-b border-white/10">
+          <div className="flex items-center justify-between px-4 py-3 bg-bg-base border-b border-white/10">
             <span className="text-sm text-white/80 truncate">{activeFile || '未选择文件'}</span>
+            {isFullscreen && (
+              <div className="flex items-center gap-2 ml-4 shrink-0">
+                <button 
+                  onClick={() => setAiModifyOpen(!aiModifyOpen)} 
+                  className={cn(
+                    "flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors whitespace-nowrap",
+                    aiModifyOpen 
+                      ? "text-indigo-400 bg-indigo-500/10 border-indigo-500/20" 
+                      : "text-white/60 hover:text-white bg-white/5 hover:bg-white/10 border-white/10"
+                  )}
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  <span>AI 修改</span>
+                </button>
+                <button 
+                  onClick={() => writeToTerminal('npm test 2>&1 || echo "No test script configured"')} 
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 transition-colors whitespace-nowrap"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  <span>运行测试</span>
+                </button>
+                <button 
+                  onClick={handleSubmitMilestone} 
+                  disabled={submitting} 
+                  className="flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-medium text-black bg-white hover:bg-white/90 transition-colors disabled:opacity-50 whitespace-nowrap"
+                >
+                  <GitCommit className="w-3.5 h-3.5" />
+                  <span>{submitting ? '提交中...' : '提交 Milestone'}</span>
+                </button>
+                <div className="w-px h-4 bg-white/10 mx-1" />
+                <button
+                  onClick={exitFullscreen}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 transition-all duration-200 group"
+                  title="退出沉浸模式 (ESC)"
+                >
+                  <Minimize2 className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" />
+                  <span>退出沉浸</span>
+                </button>
+              </div>
+            )}
           </div>
           <ResizablePanel
             top={
@@ -202,4 +291,32 @@ export function ProjectWorkspace({ project, onBack, courseId }: { project: any; 
       </>)}
     </motion.div>
   );
+
+  // Fullscreen portal overlay
+  if (isFullscreen) {
+    return (
+      <>
+        <div className="flex h-full items-center justify-center">
+          <div className="flex flex-col items-center gap-3 text-white/30">
+            <Maximize2 className="w-8 h-8" />
+            <span className="text-sm font-mono">沉浸模式已开启</span>
+          </div>
+        </div>
+        {createPortal(
+          <div
+            className={`fixed inset-0 z-[60] bg-bg-base flex flex-col ${
+              isExiting ? 'fullscreen-workspace-exit' : 'fullscreen-workspace-enter'
+            }`}
+          >
+            <div className="flex-1 min-h-0 flex flex-col p-2">
+              {workspaceContent}
+            </div>
+          </div>,
+          document.body
+        )}
+      </>
+    );
+  }
+
+  return workspaceContent;
 }

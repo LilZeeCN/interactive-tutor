@@ -337,30 +337,85 @@ export async function generateText(
   const settings = getCachedAISettings();
   const model = getModel();
 
-  if (settings.api_provider === 'openai') {
-    const client = getOpenAIClient();
-    const response = await client.chat.completions.create({
-      model,
-      max_tokens: maxTokens,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage },
-      ],
-    }, { timeout: 300_000, signal: abortSignal ?? undefined });
+  let isDone = false;
+  let lastChunkTime = Date.now();
+  const timeoutMs = 30000;
+  let watchdog: NodeJS.Timeout;
 
-    return response.choices[0]?.message?.content || '';
-  }
+  const promise = new Promise<string>(async (resolve, reject) => {
+    watchdog = setInterval(() => {
+      if (isDone) {
+        clearInterval(watchdog);
+        return;
+      }
+      if (Date.now() - lastChunkTime > timeoutMs) {
+        isDone = true;
+        clearInterval(watchdog);
+        reject(new Error('API 响应超时 (超过30秒未收到数据)，请检查网络或更换模型'));
+      }
+    }, 2000);
 
-  const client = getAnthropicClient();
-  const response = await client.messages.create({
-    model,
-    max_tokens: maxTokens,
-    system: systemPrompt,
-    messages: [{ role: 'user', content: userMessage }],
-  }, { timeout: 300_000, signal: abortSignal ?? undefined });
+    try {
+      let fullText = '';
+      if (settings.api_provider === 'openai') {
+        const client = getOpenAIClient();
+        const stream = await client.chat.completions.create({
+          model,
+          max_tokens: maxTokens,
+          stream: true,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userMessage },
+          ],
+        }, { signal: abortSignal ?? undefined });
+        
+        for await (const chunk of stream) {
+          lastChunkTime = Date.now();
+          const delta = chunk.choices?.[0]?.delta?.content;
+          if (delta) fullText += delta;
+        }
+      } else {
+        const client = getAnthropicClient();
+        const thinkingModels = ['claude-sonnet-4-20250514', 'claude-opus-4-20250514'];
+        const useThinking = thinkingModels.some(m => model.includes(m));
 
-  const textBlock = response.content.find((block) => block.type === 'text');
-  return textBlock ? textBlock.text : '';
+        const stream = client.messages.stream({
+          model,
+          max_tokens: maxTokens,
+          ...(useThinking ? { thinking: { type: 'enabled', budget_tokens: Math.min(10000, maxTokens - 1000) } } : {}),
+          system: systemPrompt,
+          messages: [{ role: 'user', content: userMessage }],
+        });
+
+        if (abortSignal) {
+          const onAbort = () => stream.abort();
+          if (abortSignal.aborted) { stream.abort(); throw new Error('Aborted'); }
+          abortSignal.addEventListener('abort', onAbort, { once: true });
+          stream.on('end', () => abortSignal.removeEventListener('abort', onAbort));
+        }
+
+        stream.on('text', (text) => {
+          lastChunkTime = Date.now();
+          fullText += text;
+        });
+        stream.on('thinking', () => {
+          lastChunkTime = Date.now();
+        });
+
+        await stream.finalMessage();
+      }
+      
+      isDone = true;
+      clearInterval(watchdog);
+      resolve(fullText);
+    } catch (err) {
+      isDone = true;
+      clearInterval(watchdog);
+      reject(err);
+    }
+  });
+
+  return promise;
 }
 
 export function invalidateAISettingsCache(): void {

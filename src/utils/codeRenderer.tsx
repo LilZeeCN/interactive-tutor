@@ -64,7 +64,16 @@ const codeComponent = ({ className, children, ...props }: any) => {
 
 export const markdownComponents = {
   pre({ children }: any) {
-    return <>{children}</>;
+    const child = Array.isArray(children) ? children[0] : children;
+    const className = child?.props?.className || '';
+    if (/language-\w+/.test(className)) {
+      return <>{children}</>;
+    }
+    return (
+      <pre className="relative overflow-x-auto rounded-xl border border-white/10 bg-[#0A0A0A] p-4 text-sm leading-relaxed [&>code]:bg-transparent [&>code]:p-0 [&>code]:text-inherit">
+        {children}
+      </pre>
+    );
   },
   code: codeComponent,
   // Style <details>/<summary> elements for collapsible sections

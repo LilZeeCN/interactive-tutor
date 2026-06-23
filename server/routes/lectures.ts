@@ -116,7 +116,7 @@ lecturesRouter.post('/:id/lectures/cancel-chapter/:chapterNum', (req: Request, r
 
   const cancelled = cancelChapterContentGeneration(id, chapter);
   const result = db.prepare(
-    "UPDATE lectures SET status = 'pending', content = NULL WHERE course_id = ? AND chapter_num = ? AND status = 'generating'"
+    "UPDATE lectures SET status = 'pending', content = '' WHERE course_id = ? AND chapter_num = ? AND status = 'generating'"
   ).run(id, chapter);
 
   res.json({ success: true, cancelled, resetCount: result.changes });

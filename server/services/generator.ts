@@ -8,12 +8,9 @@ import { buildSyllabusPrompt } from '../prompts/syllabus.js';
 const activeGeneration = new Set<string>();
 import { buildLabListPrompt, buildLabDetailPrompt } from '../prompts/labs.js';
 import { buildProjectListPrompt, buildProjectDetailPrompt } from '../prompts/projects.js';
-import { buildLectureOutlinePrompt, buildLectureSectionPrompt, type LectureStyle, type ContentType } from '../prompts/lectures.js';
+import { buildLectureOutlinePrompt, buildLectureSectionPrompt, type LectureStyle } from '../prompts/lectures.js';
 import { getCourseMemory, injectMemorySection } from './memory.js';
 import { workspace } from './workspace.js';
-import { sanitizeLectureHtml } from './htmlSanitizer.js';
-import { validateLectureHtml } from './htmlValidator.js';
-import { extractHtmlSummary } from './htmlSummary.js';
 import { validateLectureContent } from './validator.js';
 import { trackTask } from '../helpers/taskTracker.js';
 import { parseJSON, safeJSONParse } from './parseJSON.js';
@@ -47,6 +44,77 @@ function isAbortError(err: unknown): boolean {
 
 function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw new Error('Generation cancelled');
+}
+
+function isObject(value: unknown): value is Record<string, any> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function findSyllabusArray(value: unknown): any[] | null {
+  if (Array.isArray(value)) return value;
+  if (!isObject(value)) return null;
+
+  const directKeys = ['syllabus', 'weeks', 'outline', 'course_outline', 'courseOutline', 'schedule', 'modules'];
+  for (const key of directKeys) {
+    if (Array.isArray(value[key])) return value[key];
+  }
+
+  for (const child of Object.values(value)) {
+    if (!isObject(child)) continue;
+    for (const key of directKeys) {
+      if (Array.isArray(child[key])) return child[key];
+    }
+  }
+
+  return null;
+}
+
+export function normalizeSyllabusOutput(value: unknown): any[] {
+  const rows = findSyllabusArray(value);
+  if (!rows) return [];
+
+  return rows
+    .filter(isObject)
+    .map((row, index) => {
+      const week = Number(row.week ?? row.week_num ?? row.weekNumber ?? index + 1);
+      const topic = String(row.topic ?? row.title ?? row.name ?? '').trim();
+      if (!Number.isFinite(week) || week < 1 || !topic) return null;
+
+      const readings = Array.isArray(row.readings) ? row.readings : [];
+      const assignments = Array.isArray(row.assignments)
+        ? row.assignments
+        : Array.isArray(row.labs)
+          ? row.labs.map((lab: any) => ({ ...lab, type: 'lab' }))
+          : [];
+
+      return {
+        ...row,
+        week,
+        topic,
+        readings: readings
+          .filter(isObject)
+          .map((reading: any) => ({
+            title: String(reading.title ?? reading.name ?? '推荐阅读').trim(),
+            url: String(reading.url ?? reading.link ?? '').trim(),
+          }))
+          .filter((reading: any) => reading.title && reading.url && reading.url !== '#'),
+        assignments: assignments
+          .filter(isObject)
+          .map((assignment: any) => ({
+            title: String(assignment.title ?? assignment.name ?? '').trim(),
+            type: assignment.type === 'project' ? 'project' : 'lab',
+            status: 'pending',
+            description: typeof assignment.description === 'string' ? assignment.description : undefined,
+          }))
+          .filter((assignment: any) => assignment.title),
+        status: ['pending', 'in-progress', 'completed'].includes(row.status) ? row.status : 'pending',
+      };
+    })
+    .filter(Boolean) as any[];
+}
+
+function parseSyllabusText(text: string): any[] {
+  return normalizeSyllabusOutput(parseJSON(text));
 }
 
 export function startLabDetailGeneration(courseId: string, labId: string): { started: boolean; promise?: Promise<void> } {
@@ -125,14 +193,40 @@ export async function generateCourseOutline(course: CourseInput, options: { forc
   console.log(`[outline] Generating syllabus for: ${course.title}`);
 
   try {
-    const syllabusText = await generateText(
-      '你是一位资深的课程设计专家。请严格按照要求的 JSON 数组格式输出教学大纲，不要包含 markdown 代码块标记。',
-      buildSyllabusPrompt(course),
-      4096
-    );
-    const syllabus = parseJSON(syllabusText) as any[];
-    if (!Array.isArray(syllabus) || syllabus.length === 0) {
-      console.error(`[outline] Syllabus parse bad result: type=${typeof syllabus}, len=${Array.isArray(syllabus) ? syllabus.length : 'N/A'}, text=${syllabusText.slice(0, 300)}`);
+    const systemPrompt = '你是一位资深的课程设计专家。请严格按照要求的 JSON 数组格式输出教学大纲，不要包含 markdown 代码块标记。';
+    const basePrompt = buildSyllabusPrompt(course);
+    const retryPrompt = `${basePrompt}
+
+【格式纠偏】
+你上次的输出没有被系统识别为非空教学大纲数组。请重新输出，必须满足：
+1. 顶层必须是 JSON array，直接以 [ 开头、以 ] 结尾。
+2. 不要使用 {"syllabus": [...]}、{"weeks": [...]} 或任何对象包裹。
+3. 数组内至少包含 8 个 week 对象。
+4. 每个对象必须包含 week、topic、readings、assignments、status。
+5. JSON 外不要附加解释、标题、Markdown 或代码块。`;
+
+    let syllabus: any[] = [];
+    let lastInvalidSample = '';
+    for (const [index, prompt] of [basePrompt, retryPrompt].entries()) {
+      const syllabusText = await generateText(systemPrompt, prompt, 8192);
+      lastInvalidSample = syllabusText.slice(0, 500);
+
+      try {
+        syllabus = parseSyllabusText(syllabusText);
+      } catch (parseErr) {
+        console.error(`[outline] Syllabus parse failed on attempt ${index + 1}:`, parseErr);
+        syllabus = [];
+      }
+
+      if (syllabus.length > 0) break;
+
+      console.error(
+        `[outline] Syllabus invalid on attempt ${index + 1}: text=${lastInvalidSample}`
+      );
+    }
+
+    if (syllabus.length === 0) {
+      console.error(`[outline] Syllabus parse bad result after retry: text=${lastInvalidSample}`);
       throw new Error('Syllabus generation returned invalid data');
     }
     {
@@ -156,6 +250,7 @@ export async function generateCourseOutline(course: CourseInput, options: { forc
         }
       });
       insertAll(syllabus);
+      db.prepare('UPDATE courses SET generation_error = NULL WHERE id = ?').run(course.id);
       console.log(`[outline] Syllabus: ${syllabus.length} weeks`);
     }
   } catch (err) {
@@ -276,7 +371,7 @@ async function _generateChapterContent(courseId: string, chapterNum: number, abo
 
   if (sections.length === 0) return;
 
-  const course = dbGet<{ title: string; description: string; content: string; lecture_style: string; lecture_format: string }>('SELECT title, description, content, lecture_style, lecture_format FROM courses WHERE id = ?', courseId);
+  const course = dbGet<{ title: string; description: string; content: string; lecture_style: string }>('SELECT title, description, content, lecture_style FROM courses WHERE id = ?', courseId);
   if (!course) {
     console.error(`[lectures] Course ${courseId} not found, skipping chapter ${chapterNum}`);
     return;
@@ -325,11 +420,7 @@ async function _generateChapterContent(courseId: string, chapterNum: number, abo
           ? '\n请根据以上学生画像和学习状态，适当调整讲解的深度、例子选择和难度节奏。如果学生在某些知识点有困难，在这些地方增加更多解释和示例。\n'
           : '';
 
-        const contentType: ContentType = (course.lecture_format === 'html' ? 'html' : 'markdown');
-        const isHtml = contentType === 'html';
-        const systemPrompt = isHtml
-          ? `你是一位善于教学的资深讲师。请生成完整的交互式 HTML 讲义文件。\n${memoryContext}${personalizedNote}`
-          : `你是一位善于教学的资深讲师。请严格按照要求的 Markdown 结构输出讲义内容。\n${memoryContext}${personalizedNote}`;
+        const systemPrompt = `你是一位善于教学的资深讲师。请严格按照要求的 Markdown 结构输出讲义内容。\n${memoryContext}${personalizedNote}`;
 
         const content = await generateText(
           systemPrompt,
@@ -341,119 +432,47 @@ async function _generateChapterContent(courseId: string, chapterNum: number, abo
             previousSections,
             syllabusTopics,
             style: (course.lecture_style || 'khanmigo') as LectureStyle,
-            contentType,
           }),
-          isHtml ? 16384 : 8192,
+          8192,
           abortSignal
         );
 
         let finalContent = content;
-        let finalSummary = '';
-        let finalContentType = contentType;
         let validationStatus: string;
 
-        if (isHtml) {
-          // HTML path: validate HTML structure, sanitize, extract summary
-          const htmlValidation = validateLectureHtml(content);
-          if (htmlValidation.valid) {
-            const { html, warnings } = sanitizeLectureHtml(content);
-            if (warnings.length > 0) console.log(`[lectures] Sanitizer warnings for ${lecture.section_num}: ${warnings.join('; ')}`);
-            finalContent = html;
-            finalSummary = extractHtmlSummary(html, 1000);
-            finalContentType = 'html';
-            validationStatus = 'valid';
-          } else {
-            // Retry once with stricter prompt
-            console.log(`[lectures] HTML validation failed for ${lecture.section_num}: ${htmlValidation.errors.join(', ')}. Retrying...`);
-            const retryPrompt = buildLectureSectionPrompt({
-              course: { title: course.title, description: course.description || '', content: course.content || '' },
-              chapterTitle,
-              sectionNum: lecture.section_num as string,
-              sectionTitle,
-              previousSections,
-              syllabusTopics,
-              style: (course.lecture_style || 'khanmigo') as LectureStyle,
-              contentType: 'html',
-            }) + '\n\n【重要】上次生成的 HTML 有以下问题：' + htmlValidation.errors.join('；') + '\n请确保：1) 输出完整的 <!DOCTYPE html> 到 </html>；2) 有 <body> 或内容丰富的 <div>；3) 中文内容至少 300 字符。';
-
-            try {
-              const retryContent = await generateText(systemPrompt, retryPrompt, 16384, abortSignal);
-              const retryValidation = validateLectureHtml(retryContent);
-              if (retryValidation.valid) {
-                const { html, warnings } = sanitizeLectureHtml(retryContent);
-                if (warnings.length > 0) console.log(`[lectures] Sanitizer warnings (retry) for ${lecture.section_num}: ${warnings.join('; ')}`);
-                finalContent = html;
-                finalSummary = extractHtmlSummary(html, 1000);
-                finalContentType = 'html';
-                validationStatus = 'valid';
-              } else {
-                // HTML retry failed — fall back to Markdown
-                console.warn(`[lectures] HTML retry still failed for ${lecture.section_num}, falling back to Markdown`);
-                const mdContent = await generateText(
-                  `你是一位善于教学的资深讲师。请严格按照要求的 Markdown 结构输出讲义内容。\n${memoryContext}${personalizedNote}`,
-                  buildLectureSectionPrompt({
-                    course: { title: course.title, description: course.description || '', content: course.content || '' },
-                    chapterTitle,
-                    sectionNum: lecture.section_num as string,
-                    sectionTitle,
-                    previousSections,
-                    syllabusTopics,
-                    style: (course.lecture_style || 'khanmigo') as LectureStyle,
-                    contentType: 'markdown',
-                  }),
-                  8192,
-                  abortSignal
-                );
-                finalContent = mdContent;
-                finalContentType = 'markdown';
-                const mdValidation = validateLectureContent(mdContent);
-                validationStatus = mdValidation.valid ? 'valid' : 'invalid';
-              }
-            } catch (retryErr) {
-              if (wasGenerationCancelled(retryErr)) throw retryErr;
-              console.error(`[lectures] HTML retry threw for ${lecture.section_num}:`, retryErr);
-              finalContent = content;
-              finalContentType = 'markdown';
-              validationStatus = 'invalid';
-            }
-          }
+        const validation = validateLectureContent(content);
+        if (validation.valid) {
+          validationStatus = 'valid';
         } else {
-          // Markdown path: existing validation logic
-          const validation = validateLectureContent(content);
-          if (validation.valid) {
-            validationStatus = 'valid';
-          } else {
-            console.log(`[lectures] Validation failed for ${lecture.section_num}, missing: ${validation.missing.join(', ')}. Retrying...`);
-            const stricterPrompt = buildLectureSectionPrompt({
-              course: { title: course.title, description: course.description || '', content: course.content || '' },
-              chapterTitle,
-              sectionNum: lecture.section_num as string,
-              sectionTitle,
-              previousSections,
-              syllabusTopics,
-              style: (course.lecture_style || 'khanmigo') as LectureStyle,
-              contentType: 'markdown',
-            }) + '\n\n【重要补充要求】请确保内容中包含以下必要部分：' + validation.missing.join('、');
+          console.log(`[lectures] Validation failed for ${lecture.section_num}, missing: ${validation.missing.join(', ')}. Retrying...`);
+          const stricterPrompt = buildLectureSectionPrompt({
+            course: { title: course.title, description: course.description || '', content: course.content || '' },
+            chapterTitle,
+            sectionNum: lecture.section_num as string,
+            sectionTitle,
+            previousSections,
+            syllabusTopics,
+            style: (course.lecture_style || 'khanmigo') as LectureStyle,
+          }) + '\n\n【重要补充要求】请确保内容中包含以下必要部分：' + validation.missing.join('、');
 
-            const retryContent = await generateText(
-              '你是一位善于教学的资深讲师。请严格按照要求的 Markdown 结构输出讲义内容。你必须确保内容中包含学习目标、核心讲解、常见误区、练习检验等完整部分。',
-              stricterPrompt,
-              8192,
-              abortSignal
-            );
+          const retryContent = await generateText(
+            '你是一位善于教学的资深讲师。请严格按照要求的 Markdown 结构输出讲义内容。你必须确保内容中包含学习目标、核心讲解、常见误区、练习检验等完整部分。',
+            stricterPrompt,
+            8192,
+            abortSignal
+          );
 
-            const retryValidation = validateLectureContent(retryContent);
-            finalContent = retryContent;
-            validationStatus = retryValidation.valid ? 'valid' : 'invalid';
-            if (!retryValidation.valid) {
-              console.warn(`[lectures] Validation still failed for ${lecture.section_num} after retry`);
-            }
+          const retryValidation = validateLectureContent(retryContent);
+          finalContent = retryContent;
+          validationStatus = retryValidation.valid ? 'valid' : 'invalid';
+          if (!retryValidation.valid) {
+            console.warn(`[lectures] Validation still failed for ${lecture.section_num} after retry`);
           }
         }
 
         db.prepare('UPDATE lectures SET content = ?, content_type = ?, content_summary = ?, status = ?, validation_status = ? WHERE id = ?')
-          .run(finalContent, finalContentType, finalSummary, 'done', validationStatus, lecture.id);
-        console.log(`[lectures] Generated: ${lecture.section_num} (type: ${finalContentType}, validation: ${validationStatus})`);
+          .run(finalContent, 'markdown', '', 'done', validationStatus, lecture.id);
+        console.log(`[lectures] Generated: ${lecture.section_num} (validation: ${validationStatus})`);
       } catch (err) {
         if (wasGenerationCancelled(err)) throw err;
         console.error(`[lectures] Generation failed for ${lecture.section_num}:`, err);

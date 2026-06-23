@@ -6,7 +6,7 @@ const tsx = join('node_modules', '.bin', `tsx${binExt}`);
 const vite = join('node_modules', '.bin', `vite${binExt}`);
 
 const children = [
-  spawn(tsx, ['server/index.ts'], { stdio: 'inherit' }),
+  spawn(tsx, ['watch', 'server/index.ts'], { stdio: 'inherit' }),
   spawn(vite, ['--port=3000', '--host=0.0.0.0'], { stdio: 'inherit' }),
 ];
 

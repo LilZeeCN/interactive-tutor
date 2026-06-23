@@ -28,7 +28,7 @@ export function ChatView({ courseId }: ChatViewProps) {
   const [reconnecting, setReconnecting] = useState(false);
   const [backgroundGenerating, setBackgroundGenerating] = useState(false);
   const [showTopicsDrawer, setShowTopicsDrawer] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const activeMessages = useMemo(() => messagesByTopic[activeTopicId] || [], [messagesByTopic, activeTopicId]);
@@ -113,7 +113,11 @@ export function ChatView({ courseId }: ChatViewProps) {
   }, [activeTopicId, messagesByTopic]);
 
   const scrollToBottom = useCallback(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    // Set scrollTop directly on the scroll container instead of scrollIntoView.
+    // scrollIntoView scrolls the entire ancestor chain and its smooth animation
+    // collides with the throttled re-trigger during streaming (causes "flying" jitter).
+    const el = messagesContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, []);
 
   // Throttled scroll during streaming to avoid jank
@@ -343,12 +347,15 @@ export function ChatView({ courseId }: ChatViewProps) {
   };
 
   return (
-    <div className="flex h-full bg-bg-base overflow-hidden">
+    <div className="flex h-full bg-bg-base overflow-hidden relative">
       <ReconnectingIndicator show={reconnecting} />
 
       {/* Topics Sidebar */}
       <div className={cn(
-        "md:flex w-64 shrink-0 border-r border-white/10 flex-col bg-bg-surface z-30",
+        "flex-col bg-bg-surface border-r border-white/10 z-30 w-64 shrink-0",
+        // Desktop: always inline, occupies layout space (never absolute)
+        "md:flex md:static",
+        // Mobile: drawer toggled by showTopicsDrawer
         showTopicsDrawer ? "flex absolute inset-y-0 left-0" : "hidden"
       )}>
         <div className="h-16 flex items-center justify-between px-4 border-b border-white/10 shrink-0">
@@ -416,7 +423,7 @@ export function ChatView({ courseId }: ChatViewProps) {
       </div>
 
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col relative">
+      <div className="flex-1 min-w-0 min-h-0 flex flex-col relative">
         {/* Header */}
         <header className="absolute top-0 w-full h-16 bg-gradient-to-b from-bg-base to-transparent z-20 flex items-center justify-between px-8 pointer-events-none">
           <div className="flex items-center gap-3 pointer-events-auto">
@@ -437,7 +444,7 @@ export function ChatView({ courseId }: ChatViewProps) {
         </header>
 
         {/* Messages Area */}
-        <div className="flex-1 overflow-y-auto px-4 pt-24 pb-32 scroll-smooth">
+        <div ref={messagesContainerRef} className="flex-1 min-h-0 overflow-y-auto px-4 pt-24 pb-32">
           <div className="max-w-4xl mx-auto space-y-10">
             {activeMessages.length === 0 && (
               <div className="text-center py-20 text-white/30 text-sm">
@@ -561,7 +568,6 @@ export function ChatView({ courseId }: ChatViewProps) {
                 AI 正在回复...
               </div>
             )}
-            <div ref={messagesEndRef} />
           </div>
         </div>
 

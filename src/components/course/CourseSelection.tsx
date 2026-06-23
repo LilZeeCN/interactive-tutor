@@ -22,7 +22,6 @@ export function CourseSelection({ courses, onSelectCourse, onCreateCourse, onDel
     content: '',
     requirements: '',
     lectureStyle: 'khanmigo' as 'khanmigo' | 'chatgpt-learn' | 'feynman' | 'socratic' | 'first-principles' | 'harvard-tutor',
-    lectureFormat: 'markdown' as 'markdown' | 'html'
   });
   const [generatingIds, setGeneratingIds] = useState<Set<string>>(new Set());
   const [errorIds, setErrorIds] = useState<Map<string, string>>(new Map());
@@ -109,7 +108,7 @@ export function CourseSelection({ courses, onSelectCourse, onCreateCourse, onDel
 
     const newId = await onCreateCourse(newCourse);
     setIsModalOpen(false);
-    setNewCourse({ title: '', description: '', content: '', requirements: '', lectureStyle: 'khanmigo' as const, lectureFormat: 'markdown' as const });
+    setNewCourse({ title: '', description: '', content: '', requirements: '', lectureStyle: 'khanmigo' as const });
 
     if (newId) {
       setGeneratingIds((prev) => new Set([...prev, newId]));
@@ -350,41 +349,6 @@ export function CourseSelection({ courses, onSelectCourse, onCreateCourse, onDel
                           {style.desc}
                         </p>
                         {newCourse.lectureStyle === style.id && (
-                          <div className="absolute top-2 right-2 w-5 h-5 rounded-full bg-white flex items-center justify-center">
-                            <div className="w-2 h-2 rounded-full bg-black" />
-                          </div>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-white/70 mb-3">讲义格式</label>
-                  <div className="grid grid-cols-2 gap-3">
-                    {([
-                      { id: 'markdown' as const, icon: '📝', name: 'Markdown', desc: '传统文本格式，稳定可靠，适合所有课程' },
-                      { id: 'html' as const, icon: '🎨', name: '交互式 HTML', desc: '带动画、测验、代码编辑器的交互式页面（需 AI 支持 HTML）' },
-                    ] as const).map((fmt) => (
-                      <button
-                        key={fmt.id}
-                        type="button"
-                        onClick={() => setNewCourse({ ...newCourse, lectureFormat: fmt.id })}
-                        className={cn(
-                          "relative p-4 rounded-xl border text-left transition-all",
-                          newCourse.lectureFormat === fmt.id
-                            ? "border-white/40 bg-white/10"
-                            : "border-white/10 bg-white/[0.02] hover:border-white/20"
-                        )}
-                      >
-                        <div className="flex items-center gap-2 mb-2">
-                          <span>{fmt.icon}</span>
-                          <span className="font-medium text-sm">{fmt.name}</span>
-                        </div>
-                        <p className="text-xs text-white/50 leading-relaxed">
-                          {fmt.desc}
-                        </p>
-                        {newCourse.lectureFormat === fmt.id && (
                           <div className="absolute top-2 right-2 w-5 h-5 rounded-full bg-white flex items-center justify-center">
                             <div className="w-2 h-2 rounded-full bg-black" />
                           </div>

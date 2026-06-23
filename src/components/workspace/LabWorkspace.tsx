@@ -1,5 +1,6 @@
-import { useState, useRef } from 'react';
-import { BookOpen, Clock, Code, FolderGit2, TerminalSquare, Bot, MessageSquare, PanelLeftClose, PanelLeftOpen, Play, Sparkles, Loader2, ListChecks, ArrowLeft } from 'lucide-react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
+import { BookOpen, Clock, Code, TerminalSquare, Bot, MessageSquare, PanelLeftClose, PanelLeftOpen, Play, Sparkles, Loader2, ListChecks, ArrowLeft, Maximize2, Minimize2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -40,6 +41,30 @@ export function LabWorkspace({ lab, onBack, isInstructionsOpen, onToggleInstruct
   const [tutorLoading, setTutorLoading] = useState(false);
   const tutorEndRef = useRef<HTMLDivElement>(null);
 
+  // Fullscreen immersive mode
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isExiting, setIsExiting] = useState(false);
+
+  const exitFullscreen = useCallback(() => {
+    setIsExiting(true);
+    setTimeout(() => {
+      setIsFullscreen(false);
+      setIsExiting(false);
+    }, 250);
+  }, []);
+
+  useEffect(() => {
+    if (!isFullscreen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        exitFullscreen();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isFullscreen, exitFullscreen]);
+
   const handleTutorSend = async () => {
     if (!tutorInput.trim() || tutorLoading) return;
     const question = tutorInput.trim();
@@ -50,7 +75,7 @@ export function LabWorkspace({ lab, onBack, isInstructionsOpen, onToggleInstruct
       const code = activeFile ? `\n当前打开的文件 ${activeFile}:\n\`\`\`\n${fileContent}\n\`\`\`` : '';
       let full = '';
       setTutorMessages(prev => [...prev, { role: 'assistant', content: '' }]);
-      await fetchSSEWithRetry('/api/review', { code, labTitle: lab?.title, instructions: `你是这个实验的AI助教。学生的问题是：${question}\n\n实验标题：${lab?.title}\n实验主题:${lab?.topic}\n\n实验说明：\n${lab?.instructions || '无'}${code}\n\n请用简洁的中文回答，给出具体建议和代码示例。` }, {
+      await fetchSSEWithRetry('/api/review', { code, labTitle: lab?.title, instructions: `你是这个实验的AI助教。学生的问题是：${question}\n\n实验标题：${lab?.title}\n实验主题:${lab?.topic}\n\n实验说明：\n${lab?.instructions || '无'}${code}\n\n请用简洁的中文回答，给出具体建议和代码示例。`, courseId, labId: lab?.id }, {
         onChunk: (d) => {
           if (d.type === 'chunk') {
             full += d.content;
@@ -89,7 +114,7 @@ export function LabWorkspace({ lab, onBack, isInstructionsOpen, onToggleInstruct
     setAiFeedback('');
     try {
       let fullContent = '';
-      await fetchSSEWithRetry('/api/review', { code: fileContent, labTitle: lab?.title, instructions: lab?.instructions }, {
+      await fetchSSEWithRetry('/api/review', { code: fileContent, labTitle: lab?.title, instructions: lab?.instructions, courseId, labId: lab?.id }, {
         onChunk: (d) => {
           if (d.type === 'chunk') {
             fullContent += d.content;
@@ -108,27 +133,49 @@ export function LabWorkspace({ lab, onBack, isInstructionsOpen, onToggleInstruct
 
   if (!lab) return <div className="flex h-full items-center justify-center"><div className="w-7 h-7 rounded-full bg-white/[0.06] animate-pulse" /></div>;
 
-  return (
+  const workspaceContent = (
     <motion.div
-      initial={{ opacity: 0, y: 10 }}
-      animate={{ opacity: 1, y: 0 }}
+      initial={isFullscreen ? false : { opacity: 0, y: 10 }}
+      animate={isFullscreen ? false : { opacity: 1, y: 0 }}
       transition={{ duration: 0.4 }}
-      className="space-y-6 h-full flex flex-col min-h-0"
+      className={isFullscreen ? "h-full flex flex-col min-h-0" : "space-y-6 h-full flex flex-col min-h-0"}
     >
       {lab?.instructions && (<>
-      <div className="flex items-start justify-between shrink-0">
-        <div>
-          <div className="flex items-center gap-3 mb-3">
-            <button onClick={onBack} className="p-1.5 hover:bg-white/10 rounded-lg text-white/60 hover:text-white transition-colors -ml-1.5" aria-label="返回"><ArrowLeft className="w-4 h-4" /></button>
-            <span className="px-2.5 py-1 rounded-md text-[10px] font-mono uppercase tracking-widest bg-amber-500/10 text-amber-400 border border-amber-500/20">LAB</span>
-            <span className="px-2.5 py-1 rounded-md text-[10px] font-mono uppercase tracking-widest bg-white/5 text-white/60 border border-white/10">{lab.topic}</span>
+      {!isFullscreen && (
+        <>
+          <div className="flex items-start justify-between shrink-0">
+            <div>
+              <div className="flex items-center gap-3 mb-3">
+                <button onClick={onBack} className="p-1.5 hover:bg-white/10 rounded-lg text-white/60 hover:text-white transition-colors -ml-1.5" aria-label="返回"><ArrowLeft className="w-4 h-4" /></button>
+                <span className="px-2.5 py-1 rounded-md text-[10px] font-mono uppercase tracking-widest bg-amber-500/10 text-amber-400 border border-amber-500/20">LAB</span>
+                <span className="px-2.5 py-1 rounded-md text-[10px] font-mono uppercase tracking-widest bg-white/5 text-white/60 border border-white/10">{lab.topic}</span>
+              </div>
+              <h2 className="text-3xl font-medium tracking-tight text-white">{lab.title}</h2>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => isFullscreen ? exitFullscreen() : setIsFullscreen(true)}
+                className={cn(
+                  "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border transition-all duration-200 group",
+                  isFullscreen
+                    ? "text-emerald-400 bg-emerald-500/10 border-emerald-500/20 hover:bg-emerald-500/20"
+                    : "text-white/60 hover:text-white bg-white/5 hover:bg-white/10 border-white/10 hover:border-white/20"
+                )}
+                title={isFullscreen ? "退出沉浸模式 (ESC)" : "沉浸式编程模式"}
+              >
+                {isFullscreen
+                  ? <Minimize2 className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                  : <Maximize2 className="w-4 h-4 group-hover:scale-110 transition-transform" />
+                }
+                <span className="hidden lg:inline">{isFullscreen ? '退出沉浸' : '沉浸模式'}</span>
+              </button>
+              <div className="flex items-center gap-2 text-amber-400 bg-amber-500/10 px-4 py-2 rounded-lg border border-amber-500/20"><Clock className="w-4 h-4" /><span className="text-sm font-medium">进行中</span></div>
+            </div>
           </div>
-          <h2 className="text-3xl font-medium tracking-tight text-white">{lab.title}</h2>
-        </div>
-        <div className="flex items-center gap-2 text-amber-400 bg-amber-500/10 px-4 py-2 rounded-lg border border-amber-500/20"><Clock className="w-4 h-4" /><span className="text-sm font-medium">进行中</span></div>
-      </div>
 
-      <EnvironmentStatus courseId={courseId} />
+          <EnvironmentStatus courseId={courseId} />
+        </>
+      )}
 
       <div className="flex-1 min-h-0 flex rounded-xl overflow-hidden border border-white/10 shadow-2xl">
         {isInstructionsOpen && (
@@ -162,16 +209,27 @@ export function LabWorkspace({ lab, onBack, isInstructionsOpen, onToggleInstruct
               <div className="w-px h-4 bg-white/10 mx-1" /><Code className="w-4 h-4 text-indigo-400" />
               <span className="text-sm text-white/80 truncate">{activeFile || '未选择文件'}</span>
             </div>
-            <div className="flex items-center gap-2"><span className="text-xs text-white/40 font-mono">{activeFile.split('.').pop()?.toUpperCase()}</span></div>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-white/40 font-mono">{activeFile.split('.').pop()?.toUpperCase()}</span>
+              {isFullscreen && (
+                <>
+                  <div className="w-px h-4 bg-white/10" />
+                  <button
+                    onClick={exitFullscreen}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 transition-all duration-200 group"
+                    title="退出沉浸模式 (ESC)"
+                  >
+                    <Minimize2 className="w-3.5 h-3.5 group-hover:scale-110 transition-transform" />
+                    <span>退出沉浸</span>
+                  </button>
+                </>
+              )}
+            </div>
           </div>
           <ResizablePanel
             top={
               <div className="h-full flex">
                 <div className="w-56 shrink-0 flex flex-col border-r border-white/10 bg-bg-base">
-                  <div className="px-4 py-3 border-b border-white/10 flex items-center gap-2 text-sm font-medium text-white/80">
-                    <FolderGit2 className="w-4 h-4 text-white/50" />
-                    <span>资源管理器</span>
-                  </div>
                   <FileTree
                     tree={fileTree}
                     activeFile={activeFile}
@@ -287,4 +345,32 @@ export function LabWorkspace({ lab, onBack, isInstructionsOpen, onToggleInstruct
       </>)}
     </motion.div>
   );
+
+  // Fullscreen portal overlay
+  if (isFullscreen) {
+    return (
+      <>
+        <div className="flex h-full items-center justify-center">
+          <div className="flex flex-col items-center gap-3 text-white/30">
+            <Maximize2 className="w-8 h-8" />
+            <span className="text-sm font-mono">沉浸模式已开启</span>
+          </div>
+        </div>
+        {createPortal(
+          <div
+            className={`fixed inset-0 z-[60] bg-bg-base flex flex-col ${
+              isExiting ? 'fullscreen-workspace-exit' : 'fullscreen-workspace-enter'
+            }`}
+          >
+            <div className="flex-1 min-h-0 flex flex-col p-2">
+              {workspaceContent}
+            </div>
+          </div>,
+          document.body
+        )}
+      </>
+    );
+  }
+
+  return workspaceContent;
 }

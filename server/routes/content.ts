@@ -86,29 +86,6 @@ contentRouter.put('/:id/syllabus/:rowId', (req: Request, res: Response) => {
   res.json({ success: true });
 });
 
-// ====== Notes ======
-
-// GET /api/courses/:id/notes
-contentRouter.get('/:id/notes', (req: Request, res: Response) => {
-  const db = getDb();
-  const row = dbGet('SELECT * FROM notes WHERE course_id = ?', req.params.id);
-  res.json({ content: row?.content || '' });
-});
-
-// PUT /api/courses/:id/notes - regenerate notes via AI
-contentRouter.put('/:id/notes', asyncHandler(async (req: Request, res: Response) => {
-  const { content } = req.body;
-  if (content === undefined) {
-    res.status(400).json({ error: 'content 不能为空' });
-    return;
-  }
-  const db = getDb();
-  db.prepare(
-    'INSERT INTO notes (course_id, content) VALUES (?, ?) ON CONFLICT(course_id) DO UPDATE SET content = ?'
-  ).run(req.params.id, content, content);
-  res.json({ success: true });
-}));
-
 // ====== Labs ======
 
 // GET /api/courses/:id/labs

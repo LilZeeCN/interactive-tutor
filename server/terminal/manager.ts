@@ -112,8 +112,7 @@ export class TerminalManager {
     this.sessions.set(sessionId, session);
   }
 
-  private sendPrompt(child: ChildProcess, ws: WebSocket): void {
-    const cwd = child.spawnfile;
+  private sendPrompt(_child: ChildProcess, ws: WebSocket): void {
     const prompt = `\x1b[38;2;100;200;255m$\x1b[0m `;
     ws.send(JSON.stringify({ type: 'output', data: prompt }));
   }

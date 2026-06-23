@@ -5,7 +5,6 @@ import {
   History, Download, RotateCcw, Square
 } from 'lucide-react';
 import { MarkdownRenderer } from '../ui/MarkdownRenderer';
-import { HtmlLectureRenderer } from './HtmlLectureRenderer';
 import { SkeletonArticle } from '../layout/Skeleton';
 import { fetchSSEWithRetry } from '../../hooks/useStreamFetch';
 import { ReconnectingIndicator } from '../layout/ReconnectingIndicator';
@@ -47,6 +46,7 @@ export function LectureView({ courseId }: LectureViewProps) {
   const [expandedChapters, setExpandedChapters] = useState<Set<number>>(new Set());
   const [generatingChapters, setGeneratingChapters] = useState<Set<number>>(new Set());
   const [pendingChapter, setPendingChapter] = useState<number | null>(null);
+  const [chapterToCancel, setChapterToCancel] = useState<number | null>(null);
 
   // AI Chat state
   const [showChat, setShowChat] = useState(false);
@@ -59,15 +59,19 @@ export function LectureView({ courseId }: LectureViewProps) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const sendingRef = useRef(false);
+  const contentAreaRef = useRef<HTMLDivElement>(null);
 
   const activeSection = useMemo(() => sections.find(s => s.id === activeSectionId), [sections, activeSectionId]);
   const chapters = useMemo(() => groupByChapter(sections), [sections]);
 
-  // Check if a chapter has any generated content
+  // A chapter counts as "generated" only when ALL its sections have content.
+  // Using every() (not some()) ensures partially-generated chapters (e.g. some
+  // sections are still pending/empty) still surface the generate entry, so users
+  // can fill in the missing sections instead of getting stuck with no button.
   const isChapterGenerated = (chapterNum: number) => {
     const ch = chapters.find(c => c.chapterNum === chapterNum);
     if (!ch) return false;
-    return ch.sections.some(s => s.content && s.content.length > 50);
+    return ch.sections.every(s => s.content && s.content.length > 50);
   };
 
   const isChapterGenerating = (chapterNum: number) => {
@@ -111,6 +115,13 @@ export function LectureView({ courseId }: LectureViewProps) {
     }, 30_000);
     return () => { if (heartbeatRef.current) clearInterval(heartbeatRef.current); };
   }, [activeSection, courseId]);
+
+  // Reset scroll position of content area when active section changes
+  useEffect(() => {
+    if (contentAreaRef.current) {
+      contentAreaRef.current.scrollTop = 0;
+    }
+  }, [activeSectionId]);
 
   // Mark section as completed
   const markCompleted = async () => {
@@ -267,6 +278,13 @@ export function LectureView({ courseId }: LectureViewProps) {
     } catch {
       setGeneratingChapters(prev => { const n = new Set(prev); n.delete(chapterNum); return n; });
     }
+  };
+
+  const retrySection = async (section: LectureSection) => {
+    setSections(prev => prev.map(s =>
+      s.id === section.id ? { ...s, status: 'generating', content: '' } : s
+    ));
+    await generateChapter(section.chapter_num);
   };
 
   // Open AI chat for current section
@@ -500,12 +518,7 @@ export function LectureView({ courseId }: LectureViewProps) {
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        apiFetch(`/api/courses/${courseId}/lectures/cancel-chapter/${ch.chapterNum}`, { method: 'POST' })
-                          .then(() => {
-                            setGeneratingChapters(prev => { const n = new Set(prev); n.delete(ch.chapterNum); return n; });
-                            loadSections();
-                          })
-                          .catch(() => {});
+                        setChapterToCancel(ch.chapterNum);
                       }}
                       className="p-1 rounded text-red-400 hover:bg-red-500/10 transition-colors"
                       aria-label="取消生成"
@@ -524,34 +537,58 @@ export function LectureView({ courseId }: LectureViewProps) {
                     const sectionTitle = s.title.split(' / ').pop() || s.title;
                     const hasContent = s.content && s.content.length > 50;
                     const isSectionGenerating = s.status === 'generating';
+                    const isSectionError = s.status === 'error';
                     return (
-                      <button
+                      <div
                         key={s.id}
-                        onClick={() => hasContent ? openSection(s) : undefined}
-                        disabled={!hasContent && !isSectionGenerating}
                         className={cn(
-                          "w-full text-left px-3 py-2 rounded-lg text-[13px] transition-all flex items-center gap-2",
+                          "w-full rounded-lg text-[13px] transition-all flex items-center gap-1",
                           isActive && hasContent
                             ? "bg-emerald-500/10 text-emerald-400"
                             : hasContent
                               ? "text-white/50 hover:bg-white/5 hover:text-white/80"
-                              : "text-white/25 cursor-default"
+                              : isSectionError
+                                ? "text-red-300/70 bg-red-500/[0.04]"
+                                : "text-white/25"
                         )}
                       >
-                        <span className="text-white/30 font-mono text-[11px] shrink-0">{s.section_num}</span>
-                        <span className="truncate flex-1">{sectionTitle}</span>
-                        {isSectionGenerating && <Loader2 className="w-3 h-3 animate-spin shrink-0 text-emerald-400" />}
-                        {hasContent && progress[`${s.chapter_num}-${s.section_num}`]?.status === 'completed' && (
-                          <CheckCircle2 className="w-3 h-3 shrink-0 text-emerald-400" />
+                        <button
+                          onClick={() => hasContent ? openSection(s) : undefined}
+                          disabled={!hasContent}
+                          className={cn(
+                            "min-w-0 flex-1 text-left px-3 py-2 rounded-lg flex items-center gap-2",
+                            hasContent ? "cursor-pointer" : "cursor-default"
+                          )}
+                        >
+                          <span className="text-white/30 font-mono text-[11px] shrink-0">{s.section_num}</span>
+                          <span className="truncate flex-1">{sectionTitle}</span>
+                          {isSectionGenerating && <Loader2 className="w-3 h-3 animate-spin shrink-0 text-emerald-400" />}
+                          {isSectionError && <span className="text-[11px] text-red-300/70 shrink-0">失败</span>}
+                          {hasContent && progress[`${s.chapter_num}-${s.section_num}`]?.status === 'completed' && (
+                            <CheckCircle2 className="w-3 h-3 shrink-0 text-emerald-400" />
+                          )}
+                        </button>
+                        {isSectionError && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              retrySection(s).catch(() => {});
+                            }}
+                            className="mr-1.5 p-1.5 rounded-md text-red-300/70 hover:text-red-200 hover:bg-red-500/10 transition-colors"
+                            aria-label="重新生成小节"
+                            title="重新生成"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                          </button>
                         )}
-                      </button>
+                      </div>
                     );
                   })}
                   {/* Generate confirmation */}
                   {pendingChapter === ch.chapterNum && !generated && !generating && (
                     <div className="mt-1 mx-1 p-3 bg-white/[0.03] rounded-lg border border-white/[0.06]">
                       <p className="text-white/50 text-xs mb-2.5">
-                        生成第{ch.chapterNum}章全部 {ch.sections.length} 个小节的讲义内容？
+                        生成第{ch.chapterNum}章的讲义内容？（已完成的小节会自动跳过）
                       </p>
                       <div className="flex gap-2">
                         <button
@@ -775,19 +812,13 @@ export function LectureView({ courseId }: LectureViewProps) {
             </div>
 
             {/* Content Body */}
-            <div className="flex-1 overflow-y-auto">
+            <div ref={contentAreaRef} id="lecture-scroll-container" className="flex-1 overflow-y-auto">
               {activeSection.content ? (
-                activeSection.content_type === 'html' ? (
-                  <div className="h-full px-4 py-6">
-                    <HtmlLectureRenderer html={activeSection.content} className="max-w-4xl mx-auto" />
-                  </div>
-                ) : (
                 <div className="max-w-3xl mx-auto px-6 py-8 pb-20">
                   <div className="prose prose-invert prose-sm max-w-none prose-p:leading-relaxed prose-pre:bg-bg-surface prose-pre:border prose-pre:border-white/10 prose-headings:font-medium prose-headings:tracking-tight prose-td:border prose-td:border-white/10 prose-td:px-4 prose-td:py-2 prose-th:border prose-th:border-white/10 prose-th:bg-white/5 prose-th:px-4 prose-th:py-2 prose-blockquote:border-l-indigo-500 prose-blockquote:bg-indigo-500/5 prose-blockquote:py-1 prose-blockquote:px-4 prose-blockquote:not-italic prose-a:text-indigo-400 prose-h2:text-lg prose-h2:mt-8 prose-h2:mb-4">
                     <MarkdownRenderer content={activeSection.content} />
                   </div>
                 </div>
-                )
               ) : (
                 <div className="flex items-center justify-center h-full text-white/40 text-sm">
                   {activeSection.status === 'generating' ? (
@@ -801,7 +832,6 @@ export function LectureView({ courseId }: LectureViewProps) {
                 </div>
               )}
             </div>
-
             {/* Version History Panel */}
             {showVersionHistory && (
               <div className="absolute top-14 right-0 w-80 h-[calc(100%-3.5rem)] bg-bg-surface border-l border-white/10 z-30 flex flex-col">
@@ -860,6 +890,56 @@ export function LectureView({ courseId }: LectureViewProps) {
               </button>
             </div>
           </>
+        )}
+
+        {/* Cancel Confirmation Modal */}
+        {chapterToCancel !== null && (
+          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+            <div className="bg-bg-raised border border-white/10 rounded-xl p-6 max-w-sm w-full mx-4 shadow-2xl">
+              <h3 className="text-lg font-medium text-white mb-2">确认取消生成？</h3>
+              <p className="text-white/60 text-sm mb-6 leading-relaxed">
+                取消后将立即断开与 AI 的连接，当前章节未生成完成的进度将被放弃。
+              </p>
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={() => setChapterToCancel(null)}
+                  className="px-4 py-2 text-sm text-white/70 hover:text-white transition-colors"
+                >
+                  继续生成
+                </button>
+                <button
+                  onClick={() => {
+                    const currentChapter = chapterToCancel;
+                    if (currentChapter === null) return;
+
+                    // Optimistically update UI to stop spinner immediately
+                    setGeneratingChapters(prev => { const n = new Set(prev); n.delete(currentChapter); return n; });
+                    setSections(prev => prev.map(s => 
+                      s.chapter_num === currentChapter && s.status === 'generating' 
+                        ? { ...s, status: 'pending' } 
+                        : s
+                    ));
+
+                    // Clear any ongoing polls to prevent them from overwriting with stale data
+                    for (const t of pollTimeoutsRef.current) clearTimeout(t);
+                    pollTimeoutsRef.current = [];
+
+                    apiFetch(`/api/courses/${courseId}/lectures/cancel-chapter/${currentChapter}`, { method: 'POST' })
+                      .then(() => {
+                        loadSections();
+                      })
+                      .catch(() => {
+                        loadSections(); // revert on failure
+                      });
+                    setChapterToCancel(null);
+                  }}
+                  className="px-4 py-2 text-sm bg-red-500/80 hover:bg-red-500 text-white rounded-lg transition-colors"
+                >
+                  确认取消
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>

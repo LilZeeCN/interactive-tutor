@@ -2,6 +2,7 @@ import { memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
+import rehypeRaw from 'rehype-raw';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
 import { sanitizePlugin } from '../../lib/sanitize';
@@ -9,7 +10,7 @@ import { markdownComponents } from '../../utils/codeRenderer.tsx';
 
 // Stable plugin arrays — created once, reused across all instances
 const remarkPlugins = [remarkGfm, remarkMath];
-const rehypePlugins = [rehypeKatex, sanitizePlugin];
+const rehypePlugins = [rehypeRaw, rehypeKatex, sanitizePlugin];
 
 interface MarkdownRendererProps {
   content: string;

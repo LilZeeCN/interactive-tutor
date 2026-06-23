@@ -8,7 +8,7 @@ export interface Course {
   content: string;
   requirements: string;
   lectureStyle?: 'khanmigo' | 'chatgpt-learn' | 'feynman' | 'socratic' | 'first-principles' | 'harvard-tutor';
-  lectureFormat?: 'markdown' | 'html';
+  lectureFormat?: 'markdown';
   createdAt: string;
 }
 
@@ -79,7 +79,7 @@ export interface LectureSection {
   section_num: string;
   title: string;
   content: string;
-  content_type?: 'markdown' | 'html';
+  content_type?: 'markdown';
   content_summary?: string;
   status: string;
   sort_order: number;

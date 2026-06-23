@@ -11,22 +11,10 @@ function flattenFileTree(nodes: { type: string; path: string; children?: any[] }
   return files;
 }
 
-// Simple per-request cache to avoid redundant DB queries within the same call chain
-let _cachedCourseId: string | null = null;
-let _cachedContext: { info: string; progress: string } | null = null;
-
 export function buildCourseContext(courseId: string): { info: string; progress: string } {
-  if (_cachedCourseId === courseId && _cachedContext) return _cachedContext;
-
-  // Invalidate cache for different course
-  if (_cachedCourseId !== courseId) {
-    _cachedCourseId = courseId;
-    _cachedContext = null;
-  }
-
-  const result = _buildCourseContext(courseId);
-  _cachedContext = result;
-  return result;
+  // Always query fresh — course progress (completed labs/projects/weeks) changes
+  // between requests, and a module-level cache would serve stale data to prompts.
+  return _buildCourseContext(courseId);
 }
 
 /** Internal implementation — do not call directly, use buildCourseContext() */

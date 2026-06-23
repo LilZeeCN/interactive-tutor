@@ -69,30 +69,25 @@ ${labsSection}
     {
       "name": "测试用例名称",
       "description": "测试描述",
-      "command": "运行命令（如 python -m pytest tests/）",
+      "command": "运行命令（如 python -m pytest tests/ 或 npm test）",
       "expected": "预期输出"
     }
-  ],
-  "environment": {
-    "language": "编程语言（如 python, java, javascript）",
-    "version": "推荐版本（如 3.11）",
-    "dependencies": ["依赖包1", "依赖包2"],
-    "setupCommands": ["安装命令1", "安装命令2"]
-  }
+  ]
 }
 
 关键要求：
-1. starter_code 必须包含完整的可运行项目文件，至少 5-8 个文件：
-   - README.md（项目说明）
-   - 配置文件（如 package.json, requirements.txt, pom.xml 等）
-   - 主要源代码文件（可以有子目录如 src/）
-   - 测试文件（如 tests/test_xxx.py）
-   - 入口文件（如 main.py, index.js, Main.java）
-   - 工具/辅助文件（如 utils.py, helpers.js）
-2. starter_code 的 key 支持路径格式（如 "src/main.py", "tests/test_solution.py"）
-3. test_cases 至少包含 3 个测试用例，command 必须能在项目根目录直接执行
-4. instructions 应该详细但不冗长，重点是帮助学生理解要做什么
-5. environment 字段必须填写，包含运行该实验所需的所有依赖和环境信息
-6. **所有文件内容必须完整、可运行。绝对不允许使用 "// ..." 或 "# ..." 或 "... 省略" 等方式省略代码。每个文件都必须是完整的、可以直接运行的代码。**
-7. 代码中要有充分的中文注释帮助学生理解`;
+1. **教学导向（核心）**：
+   - \`starter_code\` 中的业务逻辑主文件**不能是已经写完的完整代码**！
+   - 必须在关键实现处留空，并使用明确的注释指示学生补全，例如 \`// TODO: 请在此处实现核心逻辑\` 或 \`# TODO: 请在此处补全逻辑\`。
+   - 初始状态下运行测试用例应该能够执行，但测试结果应当是**失败（Failed）**的。学生的目标是通过补全代码使所有测试用例通过（绿灯）。
+2. **精简合理的文件规模（防止 JSON 截断）**：
+   - 控制项目文件在 **3-5 个** 之间即可（不要过多，防止模型输出过长被截断）：
+     - \`README.md\`（实验任务指导与要求）
+     - 项目依赖配置（如 \`package.json\` 或 \`requirements.txt\` 等）
+     - 待补充核心逻辑的源代码文件（如 \`src/solution.py\`）
+     - 验收测试文件（如 \`tests/test_solution.py\`）
+3. \`starter_code\` 的 key 支持路径格式（如 "src/solution.py", "tests/test_solution.py"）。
+4. \`test_cases\` 至少包含 3 个测试用例，且 \`command\` 必须安全、通用，能在项目根目录下直接无污染运行。
+5. \`instructions\` 以清晰的 Markdown 描述实验的目标、背景、核心原理以及提示步骤。
+6. 代码中需要有必要的中文注释，引导学生思考。`;
 }

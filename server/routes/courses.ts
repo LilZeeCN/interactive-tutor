@@ -50,7 +50,7 @@ coursesRouter.get('/:id', validateId('id'), (req: Request, res: Response) => {
 // POST /api/courses - create course & trigger content generation
 coursesRouter.post('/', requireFields('title'), (req: Request, res: Response) => {
   const db = getDb();
-  const { title, description, content, requirements, lectureStyle, lectureFormat } = req.body;
+  const { title, description, content, requirements, lectureStyle } = req.body;
 
   if (!title?.trim()) {
     res.status(400).json({ error: '标题不能为空' });
@@ -63,15 +63,13 @@ coursesRouter.post('/', requireFields('title'), (req: Request, res: Response) =>
   const safeRequirements = typeof requirements === 'string' ? requirements : '';
   const validStyles = ['khanmigo', 'chatgpt-learn', 'feynman', 'socratic', 'first-principles', 'harvard-tutor'];
   const safeLectureStyle = validStyles.includes(lectureStyle) ? lectureStyle : 'khanmigo';
-  const validFormats = ['markdown', 'html'];
-  const safeLectureFormat = validFormats.includes(lectureFormat) ? lectureFormat : 'markdown';
 
   const id = uuidv4();
   const createdAt = new Date().toISOString();
 
   db.prepare(
     'INSERT INTO courses (id, title, description, content, requirements, lecture_style, lecture_format, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
-  ).run(id, title.trim(), safeDescription, safeContent, safeRequirements, safeLectureStyle, safeLectureFormat, createdAt);
+  ).run(id, title.trim(), safeDescription, safeContent, safeRequirements, safeLectureStyle, 'markdown', createdAt);
 
   const course = dbGet<{ id: string; title: string; description: string; content: string; requirements: string; lectureStyle: string; lectureFormat: string; createdAt: string }>('SELECT id, title, description, content, requirements, lecture_style as lectureStyle, lecture_format as lectureFormat, created_at as createdAt FROM courses WHERE id = ?', id);
   res.status(201).json(course);

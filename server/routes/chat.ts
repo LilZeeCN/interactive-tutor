@@ -556,9 +556,7 @@ ${summarySection}${notesSection}${labProjectContext}${memorySection}
       'SELECT content, content_type, content_summary FROM lectures WHERE course_id = ? AND title LIKE ? LIMIT 1'
     , courseId, `%${escapeLIKE(plainTitle)}%`);
     if (lec) {
-      lectureContent = lec.content_type === 'html'
-        ? (lec.content_summary || '')
-        : (lec.content ? lec.content.slice(0, 2000) : '');
+      lectureContent = lec.content ? lec.content.slice(0, 2000) : '';
       if (lectureContent) {
         lectureContent = `\n\n## 当前讲义内容\n${lectureContent}`;
       }

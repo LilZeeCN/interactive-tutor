@@ -38,8 +38,6 @@ ${syllabus.map(s => `第${s.week}周：${s.topic}`).join('\n')}
 ]`;
 }
 
-export type ContentType = 'markdown' | 'html';
-
 export function buildLectureSectionPrompt(params: {
   course: { title: string; description: string; content: string };
   chapterTitle: string;
@@ -48,10 +46,8 @@ export function buildLectureSectionPrompt(params: {
   previousSections: { section_num: string; title: string; summary: string }[];
   syllabusTopics: string;
   style?: LectureStyle;
-  contentType?: ContentType;
 }): string {
   const style: LectureStyle = params.style || 'khanmigo';
-  const contentType: ContentType = params.contentType || 'markdown';
   const prevContext = params.previousSections.length > 0
     ? `\n\n本章已讲解的前序小节（帮助学生建立连贯性）：\n${params.previousSections.map(s => `- ${s.section_num} ${s.title}：${s.summary}`).join('\n')}`
     : '';
@@ -66,95 +62,7 @@ export function buildLectureSectionPrompt(params: {
     default: prompt = buildKhanmigoPrompt(params, prevContext); break;
   }
 
-  if (contentType === 'html') {
-    return buildHtmlLectureWrapper() + '\n\n' + convertMarkdownPromptToHtml(prompt);
-  }
   return prompt;
-}
-
-/**
- * Shared HTML generation instructions — prepended to every HTML lecture prompt.
- */
-function buildHtmlLectureWrapper(): string {
-  return `【重要：输出格式要求】
-
-你现在的任务不是输出 Markdown，而是生成一个**完整的、自包含的 HTML 文件**，用于在 iframe 中渲染交互式讲义。
-
-## 技术要求
-
-1. 输出一个完整的 HTML 文件，从 <!DOCTYPE html> 到 </html>
-2. 所有 CSS 写在 <style> 标签中，所有 JS 写在 <script> 标签中（放在 </body> 前）
-3. 不要引用任何外部资源（不要用 CDN、不要用外部字体、不要用外部图片）
-4. 可以用 SVG 内联或 CSS 绘制图形
-5. 不要使用 alert()、prompt()、confirm()
-6. 不要尝试访问 parent 窗口或 iframe 外部
-7. 所有内容必须在单个 HTML 文件中完成
-8. 保持中文输出
-
-## 视觉设计要求
-
-1. 背景色必须为 #050505（与主应用一致）
-2. 正文文字颜色 #ededed，次要文字 #a1a1aa，标题 #f4f4f5
-3. 强调色使用绿色系（#10b981, #34d399, #6ee7b7）
-4. 代码块背景色 #0A0A0A，边框 rgba(255,255,255,0.08)，圆角 8px
-5. 内容区域最大宽度 720px，居中显示，左右 padding 24px
-6. 响应式设计：在 320px-768px 宽度下也能正常阅读
-7. 所有交互元素（按钮、输入框）要有明显的 hover/active 状态
-8. 字体使用系统默认 sans-serif，行高 1.8
-
-## 可用的交互元素
-
-根据本节内容的特点，选择合适的交互元素：
-- **标签页 (Tabs)**：用 JS 实现切换，对比不同概念或方法
-- **手风琴/折叠区 (Accordion)**：点击展开/折叠详细解释
-- **内联测验**：选择题点击后显示答案和解析；填空题有输入框
-- **代码演示区**：展示代码 + 可点击"运行"按钮显示模拟输出
-- **步骤展示器**：一步步展示过程，有前进/后退按钮
-- **CSS 动画**：用 CSS transition/animation 展示概念变化过程
-- **高亮/标注**：点击高亮关键术语，显示解释 tooltip
-- **进度指示**：展示本节学习进度条
-
-## 数学公式
-
-使用 KaTeX 语法，页面会自动渲染：
-- 行内公式用 \\( ... \\)
-- 块级公式用 \\[ ... \\]
-你不需要引入 KaTeX 库，它会被自动注入。`;
-}
-
-/**
- * Convert a Markdown-format prompt into an HTML-format prompt.
- * Replaces Markdown-specific instructions with HTML equivalents.
- */
-function convertMarkdownPromptToHtml(markdownPrompt: string): string {
-  let html = markdownPrompt;
-
-  // Replace the Markdown output instruction line
-  html = html.replace(
-    /请按以下结构输出讲义（直接输出 Markdown，不要用 JSON 包裹）：/g,
-    '请按以下结构输出讲义（输出完整的 HTML 文件，不要用 JSON 包裹）：'
-  );
-
-  // Replace Markdown syntax examples with HTML equivalents
-  html = html.replace(/##\s+/g, '<h2> 标签：');
-  html = html.replace(/###\s+/g, '<h3> 标签：');
-  html = html.replace(/用 Markdown 格式/g, '用 HTML 标签和内联 CSS');
-  html = html.replace(/用 Markdown/g, '用 HTML');
-  html = html.replace(/善用加粗、代码块、引用块/g, '善用 <strong>、<code>、<blockquote> 等 HTML 标签');
-  html = html.replace(/代码块.*$/gm, '代码块用 <pre><code> 标签');
-
-  // Replace <details>/<summary> Markdown examples
-  html = html.replace(/<details>\s*<summary>/g, '用 JS 实现可折叠区域（');
-  html = html.replace(/<\/details>/g, '），点击展开/收起');
-
-  // Replace "---" separators
-  html = html.replace(/^---$/gm, '<hr> 水平分割线');
-
-  // Add a reminder at the end
-  html += '\n\n【再次提醒】输出必须是一个完整的 HTML 文件（从 <!DOCTYPE html> 到 </html>），不要输出 Markdown 格式。';
-  html += '\n教学内容和风格要求完全不变，只是输出格式从 Markdown 改为 HTML。';
-
-  return html;
 }
 
 function buildKhanmigoPrompt(params: {

@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react';
-import { ChevronRight, ChevronDown, File, Folder, FolderOpen, Plus, Trash2, Pencil, X, Check } from 'lucide-react';
+import { ChevronRight, ChevronDown, File, Folder, FolderOpen, FolderGit2, Plus, Trash2, Pencil, X, Check } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
 export interface FileNode {
@@ -186,23 +186,71 @@ function TreeNode({
 }
 
 export function FileTree({ tree, activeFile, onSelect, onCreate, onRename, onDelete }: FileTreeProps) {
+  const [rootCreating, setRootCreating] = useState(false);
+  const [rootName, setRootName] = useState('');
+  const [rootType, setRootType] = useState<'file' | 'directory'>('file');
+
+  const handleRootCreate = () => {
+    if (rootName.trim() && onCreate) {
+      onCreate(rootName.trim(), rootType);
+    }
+    setRootName('');
+    setRootCreating(false);
+  };
+
   return (
-    <div className="flex-1 overflow-y-auto py-1">
-      {tree.length === 0 && (
-        <div className="text-center text-white/30 text-xs py-4">暂无文件</div>
-      )}
-      {tree.map(node => (
-        <TreeNode
-          key={node.path}
-          node={node}
-          depth={0}
-          activeFile={activeFile}
-          onSelect={onSelect}
-          onCreate={onCreate}
-          onRename={onRename}
-          onDelete={onDelete}
-        />
-      ))}
+    <div className="flex-1 flex flex-col min-h-0">
+      <div className="px-4 py-3 border-b border-white/10 flex items-center gap-2 text-sm font-medium text-white/80 shrink-0">
+        <FolderGit2 className="w-4 h-4 text-white/50" />
+        <span>资源管理器</span>
+        {onCreate && (
+          <button
+            onClick={() => { setRootCreating(true); setRootName(''); setRootType('file'); }}
+            className="ml-auto p-1 hover:bg-white/10 rounded text-white/40 hover:text-white transition-colors"
+            title="新建文件"
+            aria-label="新建文件"
+          >
+            <Plus className="w-3.5 h-3.5" />
+          </button>
+        )}
+      </div>
+
+      <div className="flex-1 overflow-y-auto py-1">
+        {tree.length === 0 && !rootCreating && (
+          <div className="text-center text-white/30 text-xs py-4">暂无文件</div>
+        )}
+        {tree.map(node => (
+          <TreeNode
+            key={node.path}
+            node={node}
+            depth={0}
+            activeFile={activeFile}
+            onSelect={onSelect}
+            onCreate={onCreate}
+            onRename={onRename}
+            onDelete={onDelete}
+          />
+        ))}
+        {rootCreating && (
+          <div className="flex items-center gap-1.5 py-1 px-2 text-sm" style={{ paddingLeft: '8px' }}>
+            <span className="w-3.5 shrink-0" />
+            {rootType === 'directory' ? <Folder className="w-4 h-4 text-blue-400/50 shrink-0" /> : <File className="w-4 h-4 text-white/30 shrink-0" />}
+            <input
+              autoFocus
+              value={rootName}
+              onChange={e => setRootName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleRootCreate(); if (e.key === 'Escape') setRootCreating(false); }}
+              placeholder={rootType === 'directory' ? 'folder name...' : 'file name...'}
+              className="flex-1 bg-white/10 border border-white/20 rounded px-1.5 py-0.5 text-xs text-white placeholder:text-white/20 outline-none"
+            />
+            <button onClick={() => setRootType(rootType === 'file' ? 'directory' : 'file')} className="text-[10px] text-white/40 hover:text-white px-1 py-0.5 rounded bg-white/5">
+              {rootType === 'file' ? 'dir' : 'file'}
+            </button>
+            <button onClick={handleRootCreate} className="p-0.5 hover:bg-white/10 rounded" aria-label="确认创建"><Check className="w-3.5 h-3.5 text-emerald-400" /></button>
+            <button onClick={() => setRootCreating(false)} className="p-0.5 hover:bg-white/10 rounded" aria-label="取消创建"><X className="w-3.5 h-3.5 text-white/40" /></button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

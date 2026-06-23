@@ -53,13 +53,7 @@ exportRouter.get('/:id/export/lectures', (req: Request, res: Response) => {
     markdown += `## ${lecture.section_num}. ${sectionTitle}\n\n`;
 
     if (lecture.content) {
-      const lec = lecture as Record<string, unknown>;
-      if (lec.content_type === 'html') {
-        const summary = (lec.content_summary as string) || '';
-        markdown += `[交互式 HTML 讲义]\n\n${summary}\n\n`;
-      } else {
-        markdown += `${lecture.content}\n\n`;
-      }
+      markdown += `${lecture.content}\n\n`;
     }
   }
 
@@ -80,18 +74,12 @@ exportRouter.get('/:id/export/notes', (req: Request, res: Response) => {
     return;
   }
 
-  // Get main course notes
-  const notes = dbGet('SELECT * FROM notes WHERE course_id = ?', id);
   // Get topic notes
   const topicNotes = dbAll(
     'SELECT * FROM topic_notes WHERE course_id = ? ORDER BY week ASC'
   , id);
 
   let markdown = `# ${course.title} - 学习笔记\n\n`;
-
-  if (notes?.content) {
-    markdown += `## 课程笔记\n\n${notes.content}\n\n`;
-  }
 
   if (topicNotes.length > 0) {
     markdown += `---\n\n## 各周笔记\n\n`;
