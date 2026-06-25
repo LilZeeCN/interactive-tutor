@@ -132,7 +132,7 @@ export function ProjectsTab({ courseId, projects, onProjectsChange }: ProjectsTa
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4 }}
-        className="space-y-8"
+        className="space-y-8 overflow-y-auto p-6 md:p-8 h-full"
       >
         <div className="flex items-start justify-between">
           <div>

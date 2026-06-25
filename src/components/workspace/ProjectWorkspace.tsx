@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowLeft, TerminalSquare, Sparkles, Play, Bot, GitCommit, Lightbulb, Maximize2, Minimize2 } from 'lucide-react';
+import { ArrowLeft, TerminalSquare, Sparkles, Play, Bot, GitCommit, Lightbulb, Maximize2, Minimize2, Loader2 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeKatex from 'rehype-katex';
@@ -37,6 +37,25 @@ export function ProjectWorkspace({ project, onBack, courseId }: { project: any; 
   const [aiHelpQuery, setAiHelpQuery] = useState('');
   const [aiHelpAnswer, setAiHelpAnswer] = useState('');
   const [helpLoading, setHelpLoading] = useState(false);
+  const helpAbortControllerRef = useRef<AbortController | null>(null);
+
+  const handleCancelHelp = () => {
+    if (helpAbortControllerRef.current) {
+      helpAbortControllerRef.current.abort();
+      helpAbortControllerRef.current = null;
+    }
+    setAiHelpAnswer('');
+    setAiHelpQuery('');
+    setHelpLoading(false);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (helpAbortControllerRef.current) {
+        helpAbortControllerRef.current.abort();
+      }
+    };
+  }, []);
 
   // Fullscreen immersive mode
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -71,7 +90,7 @@ export function ProjectWorkspace({ project, onBack, courseId }: { project: any; 
       const acceptanceHint = currentMilestone
         ? `\n\n当前里程碑：${currentMilestone.title}\n验收标准：${currentMilestone.acceptance || currentMilestone.description || '（未指定）'}`
         : '';
-      await fetchSSEWithRetry('/api/review', { code: fileContent, labTitle: project?.title, instructions: `请审查此 Milestone 的完成情况，确认是否达到了验收标准。${acceptanceHint}`, courseId, projectId: project?.id }, {
+      await fetchSSEWithRetry('/api/review', { code: fileContent, activeFile, labTitle: project?.title, instructions: `请审查此 Milestone 的完成情况，确认是否达到了验收标准。${acceptanceHint}`, courseId, projectId: project?.id }, {
         onChunk: (d) => {
           if (d.type === 'chunk') { fullContent += d.content; setMilestoneFeedback(fullContent); }
         },
@@ -84,28 +103,46 @@ export function ProjectWorkspace({ project, onBack, courseId }: { project: any; 
   };
 
   const askAI = async (query: string, prompt: string) => {
+    if (helpAbortControllerRef.current) {
+      helpAbortControllerRef.current.abort();
+    }
+    const abortCtrl = new AbortController();
+    helpAbortControllerRef.current = abortCtrl;
+
     setHelpLoading(true);
     setAiHelpQuery(query);
     setAiHelpAnswer('');
     try {
-      const code = activeFile ? `${activeFile}:\n${fileContent}` : '';
       let full = '';
-      await fetchSSEWithRetry('/api/review', { code, labTitle: project?.title, instructions: prompt, courseId, projectId: project?.id }, {
-        onChunk: (d) => {
-          if (d.type === 'chunk') { full += d.content; setAiHelpAnswer(full); }
+      await fetchSSEWithRetry(
+        '/api/review',
+        { mode: 'tutor', question: prompt, code: fileContent, activeFile, labTitle: project?.title, instructions: project?.description, courseId, projectId: project?.id },
+        {
+          onChunk: (d) => {
+            if (d.type === 'chunk') { full += d.content; setAiHelpAnswer(full); }
+          },
+          onError: (msg) => {
+            setAiHelpAnswer(`请求失败：${msg}`);
+          },
         },
-        onError: (msg) => {
-          setAiHelpAnswer(`请求失败：${msg}`);
-        },
-      });
-    } catch { setAiHelpAnswer('请求失败，请检查 API 设置。'); }
-    setHelpLoading(false);
+        { signal: abortCtrl.signal }
+      );
+    } catch (err: any) {
+      if (err?.name !== 'AbortError') {
+        setAiHelpAnswer('请求失败，请检查 API 设置。');
+      }
+    } finally {
+      if (helpAbortControllerRef.current === abortCtrl) {
+        setHelpLoading(false);
+        helpAbortControllerRef.current = null;
+      }
+    }
   };
 
   if (!project) return <div className="flex h-full items-center justify-center"><div className="w-7 h-7 rounded-full bg-white/[0.06] animate-pulse" /></div>;
 
   const workspaceContent = (
-    <motion.div initial={isFullscreen ? false : { opacity: 0, scale: 0.98 }} animate={isFullscreen ? false : { opacity: 1, scale: 1 }} transition={{ duration: 0.4 }} className="h-full flex flex-col min-h-0">
+    <motion.div initial={isFullscreen ? false : { opacity: 0, scale: 0.98 }} animate={isFullscreen ? false : { opacity: 1, scale: 1 }} transition={{ duration: 0.4 }} className={isFullscreen ? "h-full flex flex-col min-h-0" : "h-full flex flex-col min-h-0 px-6 lg:px-8 pb-6"}>
       {project?.starter_code && (<>
       {!isFullscreen && (
         <>
@@ -250,14 +287,15 @@ export function ProjectWorkspace({ project, onBack, courseId }: { project: any; 
                 <p className="text-sm text-indigo-200/70">{milestones.find((m: any) => m.status === 'in-progress')?.description || milestones[0]?.description || ''}</p>
               </div>
             )}
-            {milestoneFeedback && (
+            {(submitting || milestoneFeedback) && (
               <div className="border border-indigo-500/20 rounded-xl bg-indigo-500/[0.03] overflow-hidden">
                 <div className="px-4 py-2 border-b border-indigo-500/20 flex items-center gap-2 bg-white/[0.02] shrink-0">
                   <Bot className="w-4 h-4 text-indigo-400" />
                   <span className="text-sm font-medium text-indigo-300">Milestone 审查</span>
-                  <button onClick={() => setMilestoneFeedback('')} className="ml-auto text-white/40 hover:text-white text-xs">清除</button>
+                  {!submitting && <button onClick={() => setMilestoneFeedback('')} className="ml-auto text-white/40 hover:text-white text-xs">清除</button>}
                 </div>
                 <div className="max-h-64 overflow-y-auto p-4 prose prose-invert prose-sm max-w-none prose-headings:font-medium prose-headings:text-indigo-200 prose-p:text-indigo-200/80 break-words custom-scrollbar">
+                  {submitting && !milestoneFeedback && <div className="flex items-center gap-2 text-indigo-300/60"><Loader2 className="w-4 h-4 animate-spin" />审查中...</div>}
                   <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeKatex, sanitizePlugin]} components={markdownComponents}>{milestoneFeedback}</ReactMarkdown>
                 </div>
               </div>
@@ -270,8 +308,8 @@ export function ProjectWorkspace({ project, onBack, courseId }: { project: any; 
                 {aiHelpAnswer ? (
                   <div>
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs text-indigo-400">{aiHelpQuery}</span>
-                      <button onClick={() => { setAiHelpAnswer(''); setAiHelpQuery(''); }} className="text-xs text-white/40 hover:text-white">返回</button>
+                      <span className="text-xs text-indigo-400 font-medium">{aiHelpQuery}</span>
+                      <button onClick={handleCancelHelp} className="p-0.5 hover:bg-white/10 rounded text-white/40 hover:text-white transition-colors text-lg leading-none">×</button>
                     </div>
                     <div className="max-h-64 overflow-y-auto prose prose-invert prose-sm max-w-none prose-headings:font-medium prose-headings:text-indigo-200 prose-p:text-indigo-200/80 break-words custom-scrollbar">
                       <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeKatex, sanitizePlugin]} components={markdownComponents}>{aiHelpAnswer}</ReactMarkdown>
@@ -279,8 +317,8 @@ export function ProjectWorkspace({ project, onBack, courseId }: { project: any; 
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    <button onClick={() => askAI('解释任务目标', `请解释一下当前项目「${project?.title}」的任务目标是什么？当前代码如下：\n\n${activeFile ? `${activeFile}:\n${fileContent}` : ''}`)} disabled={helpLoading} className="w-full text-left px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-sm text-white/70 transition-colors disabled:opacity-50">{helpLoading ? '思考中...' : '解释一下当前任务的目标'}</button>
-                    <button onClick={() => askAI('审查代码', `请帮我审查以下项目代码，看看哪里有问题：\n\n项目：${project?.title}\n\n${activeFile ? `${activeFile}:\n${fileContent}` : ''}`)} disabled={helpLoading} className="w-full text-left px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-sm text-white/70 transition-colors disabled:opacity-50">{helpLoading ? '思考中...' : '帮我看看代码哪里不对'}</button>
+                    <button onClick={() => askAI('解释任务目标', `请结合当前项目的描述和各个里程碑要求，详细解释一下项目「${project?.title}」的任务目标与验收标准分别是什么？`)} disabled={helpLoading} className="w-full text-left px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-sm text-white/70 transition-colors disabled:opacity-50">{helpLoading ? '思考中...' : '解释一下当前任务的目标'}</button>
+                    <button onClick={() => askAI('分析代码卡点', `请分析我当前编写的代码逻辑，看看哪里存在与项目目标不符的问题、逻辑漏洞或需要完善的地方？请给出引导思考的提示，不要直接给出最终代码。`)} disabled={helpLoading} className="w-full text-left px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-sm text-white/70 transition-colors disabled:opacity-50">{helpLoading ? '思考中...' : '帮我看看代码哪里不对'}</button>
                   </div>
                 )}
               </div>

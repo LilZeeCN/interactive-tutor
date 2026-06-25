@@ -41,6 +41,43 @@ export function LabWorkspace({ lab, onBack, isInstructionsOpen, onToggleInstruct
   const [tutorLoading, setTutorLoading] = useState(false);
   const tutorEndRef = useRef<HTMLDivElement>(null);
 
+  const [panelRatio, setPanelRatio] = useState(0.65);
+  const savedRatio = useRef(0.65);
+
+  const toggleHint = () => {
+    if (hintOpen) {
+      setHintOpen(false);
+      setPanelRatio(savedRatio.current);
+    } else {
+      const isAnyPanelOpen = hintOpen || reviewing || !!aiFeedback || aiModifyOpen;
+      if (!isAnyPanelOpen) {
+        savedRatio.current = panelRatio;
+        setPanelRatio(0.4);
+      }
+      setHintOpen(true);
+      setAiModifyOpen(false);
+      setAiFeedback('');
+      setReviewing(false);
+    }
+  };
+
+  const toggleModify = () => {
+    if (aiModifyOpen) {
+      setAiModifyOpen(false);
+      setPanelRatio(savedRatio.current);
+    } else {
+      const isAnyPanelOpen = hintOpen || reviewing || !!aiFeedback || aiModifyOpen;
+      if (!isAnyPanelOpen) {
+        savedRatio.current = panelRatio;
+        setPanelRatio(0.4);
+      }
+      setAiModifyOpen(true);
+      setHintOpen(false);
+      setAiFeedback('');
+      setReviewing(false);
+    }
+  };
+
   // Fullscreen immersive mode
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isExiting, setIsExiting] = useState(false);
@@ -75,7 +112,7 @@ export function LabWorkspace({ lab, onBack, isInstructionsOpen, onToggleInstruct
       const code = activeFile ? `\n当前打开的文件 ${activeFile}:\n\`\`\`\n${fileContent}\n\`\`\`` : '';
       let full = '';
       setTutorMessages(prev => [...prev, { role: 'assistant', content: '' }]);
-      await fetchSSEWithRetry('/api/review', { code, labTitle: lab?.title, instructions: `你是这个实验的AI助教。学生的问题是：${question}\n\n实验标题：${lab?.title}\n实验主题:${lab?.topic}\n\n实验说明：\n${lab?.instructions || '无'}${code}\n\n请用简洁的中文回答，给出具体建议和代码示例。`, courseId, labId: lab?.id }, {
+      await fetchSSEWithRetry('/api/review', { mode: 'tutor', question, code: fileContent, activeFile, labTitle: lab?.title, instructions: lab?.instructions, courseId, labId: lab?.id }, {
         onChunk: (d) => {
           if (d.type === 'chunk') {
             full += d.content;
@@ -110,11 +147,18 @@ export function LabWorkspace({ lab, onBack, isInstructionsOpen, onToggleInstruct
   };
 
   const handleSubmitReview = async () => {
+    const isAnyPanelOpen = hintOpen || reviewing || !!aiFeedback || aiModifyOpen;
+    if (!isAnyPanelOpen) {
+      savedRatio.current = panelRatio;
+      setPanelRatio(0.4);
+    }
+    setHintOpen(false);
+    setAiModifyOpen(false);
     setReviewing(true);
     setAiFeedback('');
     try {
       let fullContent = '';
-      await fetchSSEWithRetry('/api/review', { code: fileContent, labTitle: lab?.title, instructions: lab?.instructions, courseId, labId: lab?.id }, {
+      await fetchSSEWithRetry('/api/review', { code: fileContent, activeFile, labTitle: lab?.title, instructions: lab?.instructions, courseId, labId: lab?.id }, {
         onChunk: (d) => {
           if (d.type === 'chunk') {
             fullContent += d.content;
@@ -138,7 +182,7 @@ export function LabWorkspace({ lab, onBack, isInstructionsOpen, onToggleInstruct
       initial={isFullscreen ? false : { opacity: 0, y: 10 }}
       animate={isFullscreen ? false : { opacity: 1, y: 0 }}
       transition={{ duration: 0.4 }}
-      className={isFullscreen ? "h-full flex flex-col min-h-0" : "space-y-6 h-full flex flex-col min-h-0"}
+      className={isFullscreen ? "h-full flex flex-col min-h-0" : "space-y-6 h-full flex flex-col min-h-0 px-6 lg:px-8 pb-6"}
     >
       {lab?.instructions && (<>
       {!isFullscreen && (
@@ -227,6 +271,8 @@ export function LabWorkspace({ lab, onBack, isInstructionsOpen, onToggleInstruct
             </div>
           </div>
           <ResizablePanel
+            ratio={panelRatio}
+            onRatioChange={setPanelRatio}
             top={
               <div className="h-full flex">
                 <div className="w-56 shrink-0 flex flex-col border-r border-white/10 bg-bg-base">
@@ -248,98 +294,144 @@ export function LabWorkspace({ lab, onBack, isInstructionsOpen, onToggleInstruct
               </div>
             }
             bottom={
-              <div className="h-full border-t border-white/10 bg-bg-base flex flex-col">
-                <div className="px-4 py-2 border-b border-white/10 text-xs font-medium text-white/50 flex items-center gap-2 bg-white/[0.02]"><TerminalSquare className="w-4 h-4" />终端</div>
-                <div ref={terminalRef} key={terminalKey} className="flex-1 min-h-0 p-2 overflow-hidden" />
-              </div>
-            }
-            className="flex-1 min-h-0"
-          />
-          {hintOpen && (
-            <div className="h-72 shrink-0 border-t border-indigo-500/20 bg-bg-surface flex flex-col">
-              <div className="px-5 py-2.5 border-b border-indigo-500/20 flex items-center gap-2 bg-white/[0.02]">
-                <Bot className="w-4 h-4 text-indigo-400" />
-                <span className="text-sm font-medium text-indigo-300">AI 助教</span>
-                <button onClick={() => setHintOpen(false)} className="ml-auto p-0.5 hover:bg-white/10 rounded text-white/40 hover:text-white transition-colors text-lg leading-none">×</button>
-              </div>
-              <div className="flex-1 overflow-y-auto p-4 custom-scrollbar space-y-3">
-                {tutorMessages.length === 0 && (
-                  <div className="flex flex-col items-center justify-center h-full text-white/20 gap-2">
-                    <Bot className="w-8 h-8" />
-                    <p className="text-xs">遇到问题随时问我，我会根据当前实验帮你分析</p>
+              <div className="h-full border-t border-white/10 bg-bg-base flex flex-col min-h-0 overflow-hidden">
+                {/* Terminal */}
+                <div className={`flex flex-col min-h-0 ${hintOpen || reviewing || aiFeedback ? 'h-1/3 shrink-0' : 'flex-1'}`}>
+                  <div className="px-4 py-2 border-b border-white/10 text-xs font-medium text-white/50 flex items-center gap-2 bg-white/[0.02] shrink-0"><TerminalSquare className="w-4 h-4" />终端</div>
+                  <div ref={terminalRef} key={terminalKey} className="flex-1 min-h-0 p-2 overflow-hidden" />
+                </div>
+                {/* AI Tutor Panel */}
+                {hintOpen && (
+                  <div className="flex-1 min-h-0 border-t border-indigo-500/20 bg-bg-surface flex flex-col">
+                    <div className="px-5 py-2.5 border-b border-indigo-500/20 flex items-center gap-2 bg-white/[0.02] shrink-0">
+                      <Bot className="w-4 h-4 text-indigo-400" />
+                      <span className="text-sm font-medium text-indigo-300">AI 助教</span>
+                      <button onClick={toggleHint} className="ml-auto p-0.5 hover:bg-white/10 rounded text-white/40 hover:text-white transition-colors text-lg leading-none">×</button>
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-4 custom-scrollbar space-y-3">
+                      {tutorMessages.length === 0 && (
+                        <div className="flex flex-col items-center justify-center h-full text-white/20 gap-2">
+                          <Bot className="w-8 h-8" />
+                          <p className="text-xs">遇到问题随时问我，我会根据当前实验帮你 analysis</p>
+                        </div>
+                      )}
+                      {tutorMessages.map((msg, i) => (
+                        <div key={i} className={cn("text-sm", msg.role === 'user' ? "text-indigo-300 bg-indigo-500/10 rounded-lg px-3 py-2 ml-8" : "text-white/70")}>
+                          {msg.role === 'assistant' ? (
+                            <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeKatex, sanitizePlugin]} components={markdownComponents}>{msg.content}</ReactMarkdown>
+                          ) : msg.content}
+                        </div>
+                      ))}
+                      <div ref={tutorEndRef} />
+                    </div>
+                    <div className="shrink-0 border-t border-white/10 p-2 flex gap-2">
+                      <input
+                        value={tutorInput}
+                        onChange={e => setTutorInput(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleTutorSend(); } }}
+                        placeholder="输入你的问题..."
+                        className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-indigo-500/40"
+                        disabled={tutorLoading}
+                      />
+                      <button onClick={handleTutorSend} disabled={tutorLoading || !tutorInput.trim()} className="px-3 py-2 bg-indigo-500/20 text-indigo-300 rounded-lg text-sm hover:bg-indigo-500/30 disabled:opacity-50 transition-colors">
+                        {tutorLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <MessageSquare className="w-4 h-4" />}
+                      </button>
+                    </div>
                   </div>
                 )}
-                {tutorMessages.map((msg, i) => (
-                  <div key={i} className={cn("text-sm", msg.role === 'user' ? "text-indigo-300 bg-indigo-500/10 rounded-lg px-3 py-2 ml-8" : "text-white/70")}>
-                    {msg.role === 'assistant' ? (
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeKatex, sanitizePlugin]} components={markdownComponents}>{msg.content}</ReactMarkdown>
-                    ) : msg.content}
+                {/* AI Review Panel */}
+                {(reviewing || aiFeedback) && (
+                  <div className="flex-1 min-h-0 border-t border-indigo-500/20 bg-indigo-500/[0.03] flex flex-col">
+                    <div className="px-5 py-2.5 border-b border-indigo-500/20 flex items-center gap-2 bg-white/[0.02] shrink-0">
+                      <Bot className="w-4 h-4 text-indigo-400" />
+                      <span className="text-sm font-medium text-indigo-300">AI 审查</span>
+                      {!reviewing && (
+                        <button
+                          onClick={() => {
+                            setAiFeedback('');
+                            setPanelRatio(savedRatio.current);
+                          }}
+                          className="ml-auto p-0.5 hover:bg-white/10 rounded text-white/40 hover:text-white transition-colors text-lg leading-none"
+                        >
+                          ×
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex-1 overflow-y-auto p-5 custom-scrollbar">
+                      <div className="prose prose-invert prose-sm max-w-none prose-headings:font-medium prose-headings:text-indigo-200 prose-p:text-indigo-200/80 prose-p:leading-relaxed">
+                        {reviewing && !aiFeedback && <div className="flex items-center gap-2 text-indigo-300/60"><Loader2 className="w-4 h-4 animate-spin" />审查中...</div>}
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeKatex, sanitizePlugin]} components={markdownComponents}>{aiFeedback}</ReactMarkdown>
+                      </div>
+                    </div>
                   </div>
-                ))}
-                <div ref={tutorEndRef} />
+                )}
+                {/* AI Modify Panel */}
+                {aiModifyOpen && (
+                  <div className="shrink-0 border-t border-indigo-500/20 bg-indigo-500/[0.03] p-4">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Sparkles className="w-4 h-4 text-indigo-400" />
+                      <span className="text-sm font-medium text-indigo-300">AI 修改代码</span>
+                      <button onClick={toggleModify} className="ml-auto p-0.5 hover:bg-white/10 rounded text-white/40 hover:text-white transition-colors text-lg leading-none">×</button>
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        value={aiModifyInput}
+                        onChange={e => setAiModifyInput(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) handleAIModify(); }}
+                        placeholder="描述你想要的修改，例如：添加输入验证、修复 bug、添加新功能..."
+                        className="flex-1 bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-indigo-500/50"
+                      />
+                      <button onClick={handleAIModify} disabled={aiModifying || !aiModifyInput.trim()} className="px-5 py-2 rounded-lg text-sm font-medium text-black bg-white hover:bg-white/90 transition-colors disabled:opacity-50 shrink-0">
+                        {aiModifying ? '修改中...' : '执行修改'}
+                      </button>
+                    </div>
+                    {aiModifyResult && <p className="mt-2 text-xs text-indigo-300/80">{aiModifyResult}</p>}
+                  </div>
+                )}
               </div>
-              <div className="shrink-0 border-t border-white/10 p-2 flex gap-2">
-                <input
-                  value={tutorInput}
-                  onChange={e => setTutorInput(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleTutorSend(); } }}
-                  placeholder="输入你的问题..."
-                  className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-indigo-500/40"
-                  disabled={tutorLoading}
-                />
-                <button onClick={handleTutorSend} disabled={tutorLoading || !tutorInput.trim()} className="px-3 py-2 bg-indigo-500/20 text-indigo-300 rounded-lg text-sm hover:bg-indigo-500/30 disabled:opacity-50 transition-colors">
-                  {tutorLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <MessageSquare className="w-4 h-4" />}
-                </button>
-              </div>
-            </div>
-          )}
-          {aiFeedback && (
-            <div className="h-56 shrink-0 border-t border-indigo-500/20 bg-indigo-500/[0.03] flex flex-col">
-              <div className="px-5 py-2.5 border-b border-indigo-500/20 flex items-center gap-2 bg-white/[0.02]">
-                <Bot className="w-4 h-4 text-indigo-400" />
-                <span className="text-sm font-medium text-indigo-300">AI 审查</span>
-                {!reviewing && <button onClick={() => setAiFeedback('')} className="ml-auto p-0.5 hover:bg-white/10 rounded text-white/40 hover:text-white transition-colors text-lg leading-none">×</button>}
-              </div>
-              <div className="flex-1 overflow-y-auto p-5 custom-scrollbar">
-                <div className="prose prose-invert prose-sm max-w-none prose-headings:font-medium prose-headings:text-indigo-200 prose-p:text-indigo-200/80 prose-p:leading-relaxed">
-                  {reviewing && !aiFeedback && <div className="flex items-center gap-2 text-indigo-300/60"><Loader2 className="w-4 h-4 animate-spin" />审查中...</div>}
-                  <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeKatex, sanitizePlugin]} components={markdownComponents}>{aiFeedback}</ReactMarkdown>
-                </div>
-              </div>
-            </div>
-          )}
+            }
+            minBottom={hintOpen || reviewing || aiFeedback || aiModifyOpen ? 280 : 100}
+            className="flex-1 min-h-0"
+          />
           <div className="p-4 border-t border-white/10 bg-bg-surface flex items-center justify-between shrink-0">
             <div className="flex items-center gap-2">
-              <button onClick={() => setHintOpen(!hintOpen)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white/60 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors"><Bot className="w-4 h-4" />AI 助教</button>
-              <button onClick={() => setAiModifyOpen(!aiModifyOpen)} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-white/60 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors"><Sparkles className="w-4 h-4" />AI 修改</button>
+              <button
+                onClick={toggleHint}
+                className={cn(
+                  "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors",
+                  hintOpen
+                    ? "text-indigo-400 bg-indigo-500/10"
+                    : "text-white/60 hover:text-indigo-400 hover:bg-indigo-500/10"
+                )}
+              >
+                <Bot className="w-4 h-4" />
+                AI 助教
+              </button>
+              <button
+                onClick={toggleModify}
+                className={cn(
+                  "flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors",
+                  aiModifyOpen
+                    ? "text-indigo-400 bg-indigo-500/10"
+                    : "text-white/60 hover:text-indigo-400 hover:bg-indigo-500/10"
+                )}
+              >
+                <Sparkles className="w-4 h-4" />
+                AI 修改
+              </button>
             </div>
             <div className="flex items-center gap-3">
               <button onClick={handleRunTests} className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-emerald-400 bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/20 transition-colors"><Play className="w-4 h-4" />运行本地测试</button>
-              <button onClick={handleSubmitReview} className="flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-medium text-black bg-white hover:bg-white/90 transition-colors shadow-[0_0_20px_rgba(255,255,255,0.1)]"><MessageSquare className="w-4 h-4" />提交给 AI 审查</button>
+              <button
+                onClick={handleSubmitReview}
+                disabled={reviewing}
+                className="flex items-center gap-2 px-5 py-2 rounded-lg text-sm font-medium text-black bg-white hover:bg-white/90 transition-colors shadow-[0_0_20px_rgba(255,255,255,0.1)] disabled:opacity-50"
+              >
+                {reviewing ? <Loader2 className="w-4 h-4 animate-spin" /> : <MessageSquare className="w-4 h-4" />}
+                提交给 AI 审查
+              </button>
             </div>
           </div>
-          {aiModifyOpen && (
-            <div className="shrink-0 border-t border-indigo-500/20 bg-indigo-500/[0.03] p-4">
-              <div className="flex items-center gap-2 mb-3">
-                <Sparkles className="w-4 h-4 text-indigo-400" />
-                <span className="text-sm font-medium text-indigo-300">AI 修改代码</span>
-                <button onClick={() => setAiModifyOpen(false)} className="ml-auto p-0.5 hover:bg-white/10 rounded text-white/40 hover:text-white transition-colors text-lg leading-none">×</button>
-              </div>
-              <div className="flex gap-2">
-                <input
-                  value={aiModifyInput}
-                  onChange={e => setAiModifyInput(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) handleAIModify(); }}
-                  placeholder="描述你想要的修改，例如：添加输入验证、修复 bug、添加新功能..."
-                  className="flex-1 bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white placeholder:text-white/20 focus:outline-none focus:border-indigo-500/50"
-                />
-                <button onClick={handleAIModify} disabled={aiModifying || !aiModifyInput.trim()} className="px-5 py-2 rounded-lg text-sm font-medium text-black bg-white hover:bg-white/90 transition-colors disabled:opacity-50 shrink-0">
-                  {aiModifying ? '修改中...' : '执行修改'}
-                </button>
-              </div>
-              {aiModifyResult && <p className="mt-2 text-xs text-indigo-300/80">{aiModifyResult}</p>}
-            </div>
-          )}
         </div>
       </div>
       </>)}

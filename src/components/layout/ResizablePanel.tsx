@@ -4,6 +4,8 @@ interface ResizablePanelProps {
   top: React.ReactNode;
   bottom: React.ReactNode;
   initialRatio?: number; // 0-1, top panel percentage (default 0.65)
+  ratio?: number; // controlled ratio – when set externally, overrides internal state
+  onRatioChange?: (ratio: number) => void;
   minTop?: number; // minimum top height in px
   minBottom?: number; // minimum bottom height in px
   className?: string;
@@ -13,16 +15,24 @@ export function ResizablePanel({
   top,
   bottom,
   initialRatio = 0.65,
+  ratio: controlledRatio,
+  onRatioChange,
   minTop = 120,
   minBottom = 100,
   className,
 }: ResizablePanelProps) {
-  const [ratio, setRatio] = useState(initialRatio);
+  const [internalRatio, setInternalRatio] = useState(initialRatio);
+  const ratio = controlledRatio ?? internalRatio;
   const containerRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
   const startY = useRef(0);
   const startHeight = useRef(0);
   const startRatio = useRef(0);
+
+  const updateRatio = useCallback((newRatio: number) => {
+    if (onRatioChange) onRatioChange(newRatio);
+    else setInternalRatio(newRatio);
+  }, [onRatioChange]);
 
   const onMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -41,7 +51,7 @@ export function ResizablePanel({
       const newRatio = startRatio.current + delta / startHeight.current;
       const minRatio = minTop / startHeight.current;
       const maxRatio = 1 - minBottom / startHeight.current;
-      setRatio(Math.min(maxRatio, Math.max(minRatio, newRatio)));
+      updateRatio(Math.min(maxRatio, Math.max(minRatio, newRatio)));
     };
     const onMouseUp = () => {
       if (!dragging.current) return;
@@ -55,11 +65,11 @@ export function ResizablePanel({
       window.removeEventListener('mousemove', onMouseMove);
       window.removeEventListener('mouseup', onMouseUp);
     };
-  }, [minTop, minBottom]);
+  }, [minTop, minBottom, updateRatio]);
 
   return (
     <div ref={containerRef} className={`flex flex-col ${className || ''}`}>
-      <div style={{ flex: `0 0 ${ratio * 100}%`, minHeight: minTop }} className="min-h-0 overflow-hidden">
+      <div style={{ minHeight: minTop }} className="flex-1 min-h-0 overflow-hidden">
         {top}
       </div>
       <div

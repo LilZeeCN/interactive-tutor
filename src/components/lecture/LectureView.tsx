@@ -56,7 +56,7 @@ export function LectureView({ courseId }: LectureViewProps) {
   const [chatStreaming, setChatStreaming] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [expandedReasoning, setExpandedReasoning] = useState<Set<string>>(new Set());
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatMessagesContainerRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const sendingRef = useRef(false);
   const contentAreaRef = useRef<HTMLDivElement>(null);
@@ -291,35 +291,47 @@ export function LectureView({ courseId }: LectureViewProps) {
   const openChat = async () => {
     if (!activeSection) return;
 
+    // Show the chat panel immediately to provide instant visual feedback
+    setShowChat(true);
+
     // Find or create a topic for this section
     try {
       const topics = await apiFetch<any[]>(`/api/chat/topics?courseId=${courseId}`);
-      const sectionTitle = activeSection.title.split(' / ').pop() || activeSection.title;
-      const existingTopic = topics.find((t: any) =>
-        t.title === sectionTitle || t.title === `${activeSection.section_num} ${sectionTitle}`
-      );
+      const sectionTitle = (activeSection.title.split('/').pop() || activeSection.title).trim();
+      const targetTitleWithNum = `${activeSection.section_num} ${sectionTitle}`.trim();
+      const existingTopic = topics.find((t: any) => {
+        const tTitle = t.title.trim();
+        return tTitle === sectionTitle || tTitle === targetTitleWithNum;
+      });
 
       if (existingTopic) {
         setChatTopicId(existingTopic.id);
-        const msgs = await apiFetch(`/api/chat/topics/${existingTopic.id}/messages?limit=50`);
-        setChatMessages(msgs.messages || msgs);
+        try {
+          const msgs = await apiFetch(`/api/chat/topics/${existingTopic.id}/messages?limit=50`);
+          setChatMessages(msgs.messages || (Array.isArray(msgs) ? msgs : []));
+        } catch (err) {
+          console.error('Failed to fetch chat messages:', err);
+          setChatMessages([]);
+        }
       } else {
-        const topic = await apiFetch('/api/chat/topics', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            courseId,
-            title: `${activeSection.section_num} ${sectionTitle}`,
-            type: 'lecture',
-          }),
-        });
-        setChatTopicId(topic.id);
-        setChatMessages([]);
+        try {
+          const topic = await apiFetch('/api/chat/topics', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              courseId,
+              title: targetTitleWithNum,
+              type: 'lecture',
+            }),
+          });
+          setChatTopicId(topic.id);
+          setChatMessages([]);
+        } catch (err) {
+          console.error('Failed to create chat topic:', err);
+        }
       }
-
-      setShowChat(true);
-    } catch {
-      // ignore
+    } catch (err) {
+      console.error('Failed in openChat:', err);
     }
   };
 
@@ -330,22 +342,27 @@ export function LectureView({ courseId }: LectureViewProps) {
     sendingRef.current = true;
 
     const userMsg: Message = {
-      id: `user-${Date.now()}`,
+      id: `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       role: 'user',
       content: chatInput.trim(),
       timestamp: new Date(),
     };
-    setChatMessages(prev => [...prev, userMsg]);
+    
+    const streamMsgId = `stream-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    
+    setChatMessages(prev => [
+      ...prev,
+      userMsg,
+      {
+        id: streamMsgId,
+        role: 'tutor',
+        content: '',
+        timestamp: new Date(),
+      }
+    ]);
+    
     setChatInput('');
     setChatStreaming(true);
-
-    const streamMsgId = `stream-${Date.now()}`;
-    setChatMessages(prev => [...prev, {
-      id: streamMsgId,
-      role: 'tutor',
-      content: '',
-      timestamp: new Date(),
-    }]);
 
     try {
       abortRef.current = new AbortController();
@@ -356,7 +373,8 @@ export function LectureView({ courseId }: LectureViewProps) {
       await fetchSSEWithRetry('/api/chat', { topicId: chatTopicId, message: userMsg.content }, {
         onEvent: (data) => {
           if (data.type === 'chunk') {
-            if (data.kind === 'reasoning') {
+            const kind = data.kind || 'content';
+            if (kind === 'reasoning') {
               fullReasoning += data.content;
             } else {
               fullContent += data.content;
@@ -404,7 +422,10 @@ export function LectureView({ courseId }: LectureViewProps) {
   // Auto-scroll chat messages
   useEffect(() => {
     if (showChat && chatMessages.length > 0) {
-      messagesEndRef.current?.scrollIntoView({ behavior: chatStreaming ? 'auto' : 'smooth' });
+      const el = chatMessagesContainerRef.current;
+      if (el) {
+        el.scrollTop = el.scrollHeight;
+      }
     }
   }, [chatMessages, showChat, chatStreaming]);
 
@@ -625,7 +646,7 @@ export function LectureView({ courseId }: LectureViewProps) {
           </div>
         ) : showChat ? (
           /* AI Chat Panel */
-          <div className="flex-1 flex flex-col">
+          <div className="flex-1 flex flex-col min-h-0">
             {/* Chat Header */}
             <div className="h-14 flex items-center justify-between px-6 border-b border-white/10 shrink-0 bg-bg-surface">
               <div className="flex items-center gap-2">
@@ -651,7 +672,7 @@ export function LectureView({ courseId }: LectureViewProps) {
             </div>
 
             {/* Chat Messages */}
-            <div className="flex-1 overflow-y-auto px-4 pt-4 pb-32">
+            <div ref={chatMessagesContainerRef} className="flex-1 min-h-0 overflow-y-auto px-4 pt-4 pb-32">
               <div className="max-w-3xl mx-auto space-y-8">
                 {chatMessages.length === 0 && (
                   <div className="text-center py-16 text-white/30 text-sm">
@@ -681,24 +702,32 @@ export function LectureView({ courseId }: LectureViewProps) {
                           <div className="prose prose-invert prose-sm max-w-none prose-p:leading-relaxed prose-pre:bg-bg-surface prose-pre:border prose-pre:border-white/10 prose-headings:font-medium prose-blockquote:border-l-indigo-500 prose-blockquote:bg-indigo-500/5 prose-blockquote:py-1 prose-blockquote:px-4 prose-blockquote:not-italic">
                             {msg.reasoningContent && (
                               <div className="mb-2 not-prose">
-                                <button
-                                  onClick={() => {
-                                    setExpandedReasoning(prev => {
-                                      const n = new Set(prev);
-                                      if (n.has(msg.id)) n.delete(msg.id); else n.add(msg.id);
-                                      return n;
-                                    });
-                                  }}
-                                  className="flex items-center gap-2 text-xs text-cyan-400/70 hover:text-cyan-400 py-1"
-                                >
-                                  <Brain className="w-3 h-3" />
-                                  {expandedReasoning.has(msg.id) ? '收起思考' : '查看思考'}
-                                </button>
-                                {expandedReasoning.has(msg.id) && (
-                                  <div className="mt-1 p-2 rounded-lg bg-cyan-500/[0.04] border border-cyan-500/10 text-xs text-cyan-200/60 max-h-32 overflow-y-auto whitespace-pre-wrap">
-                                    {msg.reasoningContent}
-                                  </div>
-                                )}
+                                {(() => {
+                                  const isStreamingThis = chatStreaming && msg.content === '' && msg.id.startsWith('stream-');
+                                  const isExpanded = isStreamingThis || expandedReasoning.has(msg.id);
+                                  return (
+                                    <div>
+                                      <button
+                                        onClick={() => !isStreamingThis && setExpandedReasoning(prev => {
+                                          const n = new Set(prev);
+                                          if (n.has(msg.id)) n.delete(msg.id); else n.add(msg.id);
+                                          return n;
+                                        })}
+                                        className="flex items-center gap-2 text-xs text-cyan-400/70 hover:text-cyan-400 py-1"
+                                      >
+                                        <Brain className="w-3 h-3" />
+                                        <span>
+                                          {isStreamingThis ? '思考中...' : (isExpanded ? '收起思考' : '查看思考')}
+                                        </span>
+                                      </button>
+                                      {isExpanded && (
+                                        <div className="mt-1 p-2 rounded-lg bg-cyan-500/[0.04] border border-cyan-500/10 text-xs text-cyan-200/60 max-h-32 overflow-y-auto whitespace-pre-wrap">
+                                          {msg.reasoningContent}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
                               </div>
                             )}
                             <MarkdownRenderer content={msg.content || ''} />
@@ -727,7 +756,6 @@ export function LectureView({ courseId }: LectureViewProps) {
                     </div>
                   );
                 })}
-                <div ref={messagesEndRef} />
               </div>
             </div>
 

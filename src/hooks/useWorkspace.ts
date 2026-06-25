@@ -81,10 +81,21 @@ export function useWorkspace(
   useEffect(() => {
     if (!itemId || !hasContent) return;
     const interval = window.setInterval(() => {
-      if (document.visibilityState === 'visible') reloadTree().catch(() => {});
+      if (document.visibilityState === 'visible') {
+        reloadTree().catch(() => {});
+        if (activeFileRef.current && !saveTimeoutRef.current) {
+          apiFetch<{ content?: string }>(`${baseUrl}/file/${activeFileRef.current}`)
+            .then(data => {
+              if (data && typeof data.content === 'string') {
+                setFileContent(prev => prev !== data.content ? data.content : prev);
+              }
+            })
+            .catch(() => {});
+        }
+      }
     }, 2000);
     return () => window.clearInterval(interval);
-  }, [itemId, hasContent, reloadTree]);
+  }, [itemId, hasContent, reloadTree, baseUrl]);
 
   // Load file content
   useEffect(() => {
@@ -110,6 +121,7 @@ export function useWorkspace(
     setFileContent(value || '');
     if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
     saveTimeoutRef.current = setTimeout(() => {
+      saveTimeoutRef.current = null;
       if (!activeFile || !itemId) return;
       apiFetch(`${baseUrl}/file/${activeFile}`, {
         method: 'PUT',
@@ -171,6 +183,15 @@ export function useWorkspace(
         },
       });
       reloadTree().catch(() => {});
+      if (activeFileRef.current) {
+        apiFetch<{ content?: string }>(`${baseUrl}/file/${activeFileRef.current}`)
+          .then(data => {
+            if (data && typeof data.content === 'string') {
+              setFileContent(data.content);
+            }
+          })
+          .catch(() => {});
+      }
     } catch {
       setAiModifyResult('修改失败，请检查 API 设置。');
     }
